@@ -151,7 +151,23 @@ Start the local browser:
 
 Memory Hub returns a URL such as `http://127.0.0.1:47321`. The browser includes an overview, timeline, search, decisions, capabilities, developer directions, feedback, and open work.
 
+![Memory Hub repository overview showing recent decisions and open work](screenshots/Screenshot_20260830_003256.png)
+
 Sessions open into a complete ledger of their checkpoints, tasks, changes, decisions, directions, capabilities, open loops, evidence, and relationships. Supported memory fields can be edited, and unreferenced records can be deleted.
+
+### Follow the history
+
+The timeline keeps sessions, checkpoints, changes, and decisions in chronological order.
+
+![Memory Hub timeline showing a session and its recorded changes](screenshots/Screenshot_20260830_003322.png)
+
+### Revisit decisions and directions
+
+Dedicated views preserve technical decisions with their rationale and the developer guidance that should shape future work.
+
+| Decisions | Developer directions |
+|---|---|
+| ![Memory Hub decisions view showing rationale, alternatives, and trade-offs](screenshots/Screenshot_20260830_003338.png) | ![Memory Hub developer directions view showing retained human guidance](screenshots/Screenshot_20260830_003350.png) |
 
 The server binds only to `127.0.0.1`. It has no telemetry and does not synchronize data to the cloud. Stop it with:
 
