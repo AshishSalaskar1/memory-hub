@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#e9edf0">
+  <title>Memory Hub</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to memory</a>
+
+  <header class="masthead">
+    <a class="brand" href="#overview" aria-label="Memory Hub overview">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span>
+        <strong>Memory Hub</strong>
+        <small>Repository field notes</small>
+      </span>
+    </a>
+
+    <form class="global-search" id="search-form" role="search">
+      <label class="sr-only" for="global-search">Search repository memory</label>
+      <span aria-hidden="true">/</span>
+      <input id="global-search" name="q" type="search" placeholder="Search all memory" autocomplete="off" spellcheck="false">
+      <kbd>Enter</kbd>
+    </form>
+
+    <div class="local-badge" title="This interface uses only the local Memory Hub server">
+      <span aria-hidden="true"></span>
+      Local only
+    </div>
+  </header>
+
+  <div class="app-frame">
+    <aside class="sidebar" aria-label="Memory views">
+      <p class="nav-label">Browse</p>
+      <nav id="primary-nav">
+        <a href="#overview" data-route="overview"><span>Overview</span><b aria-hidden="true">OV</b></a>
+        <a href="#timeline" data-route="timeline"><span>Timeline</span><b aria-hidden="true">TL</b></a>
+        <a href="#decisions" data-route="decisions"><span>Decisions</span><b aria-hidden="true">DC</b></a>
+        <a href="#capabilities" data-route="capabilities"><span>Capabilities</span><b aria-hidden="true">CP</b></a>
+        <a href="#directions" data-route="directions"><span>Developer directions</span><b aria-hidden="true">DR</b></a>
+        <a href="#open-work" data-route="open-work"><span>Open work</span><b aria-hidden="true">OW</b></a>
+        <a href="#feedback" data-route="feedback"><span>Feedback</span><b aria-hidden="true">FB</b></a>
+      </nav>
+      <div class="privacy-note">
+        <span aria-hidden="true">127.0.0.1</span>
+        <p>No telemetry. No cloud sync. Repository memory stays on this machine.</p>
+      </div>
+    </aside>
+
+    <main id="main-content" tabindex="-1">
+      <section class="view-heading" aria-labelledby="view-title">
+        <div>
+          <p class="eyebrow" id="view-eyebrow">Repository memory</p>
+          <h1 id="view-title">Overview</h1>
+          <p id="view-description">The current state, recent context, and work that still needs attention.</p>
+        </div>
+        <div class="heading-actions">
+          <button class="primary-button" id="add-feedback-button" type="button" hidden>Add feedback</button>
+          <button class="refresh-button" id="refresh-button" type="button" title="Refresh this view">
+            <span aria-hidden="true">&#8635;</span> Refresh
+          </button>
+        </div>
+      </section>
+
+      <section class="filter-bar" id="filter-bar" aria-label="Filter this view" hidden>
+        <label>
+          <span>Filter records</span>
+          <input id="record-filter" type="search" placeholder="Type to narrow this view" autocomplete="off">
+        </label>
+        <label>
+          <span id="status-filter-label">Status</span>
+          <select id="status-filter">
+            <option value="">All statuses</option>
+          </select>
+        </label>
+        <output id="filter-count" aria-live="polite"></output>
+      </section>
+
+      <div id="view-content" aria-live="polite" aria-busy="true"></div>
+    </main>
+  </div>
+
+  <dialog id="search-dialog" aria-labelledby="search-title">
+    <div class="dialog-header">
+      <div>
+        <p class="eyebrow">Across every record</p>
+        <h2 id="search-title">Search results</h2>
+      </div>
+      <button class="icon-button" id="close-search" type="button" aria-label="Close search">Close</button>
+    </div>
+    <p class="search-summary" id="search-summary" aria-live="polite"></p>
+    <div id="search-results"></div>
+  </dialog>
+
+  <dialog id="detail-dialog" class="ledger-dialog" aria-labelledby="detail-title" aria-describedby="detail-status">
+    <div class="dialog-header ledger-header">
+      <div>
+        <p class="eyebrow" id="detail-eyebrow">Memory record</p>
+        <h2 id="detail-title">Record detail</h2>
+      </div>
+      <button class="icon-button" id="close-detail" type="button" aria-label="Close record detail">Close</button>
+    </div>
+    <p class="sr-only" id="detail-status" aria-live="polite"></p>
+    <div id="detail-content" class="ledger-content"></div>
+  </dialog>
+
+  <dialog id="feedback-dialog" class="feedback-dialog" aria-labelledby="feedback-dialog-title" aria-describedby="feedback-form-help feedback-form-error">
+    <form id="feedback-form" novalidate>
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">Repository ledger</p>
+          <h2 id="feedback-dialog-title">Add feedback</h2>
+        </div>
+        <button class="icon-button" id="close-feedback" type="button" aria-label="Close feedback form">Close</button>
+      </div>
+      <div class="feedback-form-body">
+        <p class="form-intro" id="feedback-form-help">Record a correction, concern, suggestion, or positive observation.</p>
+        <div class="feedback-form-grid">
+          <label class="field-row">
+            <span>Type</span>
+            <select name="type" required>
+              <option value="positive">Positive</option>
+              <option value="correction">Correction</option>
+              <option value="concern">Concern</option>
+              <option value="suggestion">Suggestion</option>
+            </select>
+          </label>
+          <label class="field-row">
+            <span>Scope</span>
+            <select name="scope" id="feedback-scope" required>
+              <option value="repository">Repository</option>
+              <option value="session">Session</option>
+              <option value="record">Record</option>
+            </select>
+          </label>
+          <label class="field-row scope-field" id="feedback-session-field" hidden>
+            <span>Session</span>
+            <select name="session_id" id="feedback-session"></select>
+            <small id="feedback-session-help">Choose the session this feedback concerns.</small>
+          </label>
+          <label class="field-row scope-field" id="feedback-record-field" hidden>
+            <span>Record ID</span>
+            <input name="record_id" id="feedback-record-id" type="text" autocomplete="off" spellcheck="false">
+            <small>Use a capture record ID, not a session or feedback ID.</small>
+          </label>
+          <label class="field-row feedback-body-field">
+            <span>Feedback</span>
+            <textarea name="body" rows="6" required></textarea>
+          </label>
+          <label class="field-row">
+            <span>Sentiment</span>
+            <select name="sentiment" required>
+              <option value="positive">Positive</option>
+              <option value="neutral" selected>Neutral</option>
+              <option value="negative">Negative</option>
+            </select>
+          </label>
+          <label class="field-row">
+            <span>Rating <small>(optional)</small></span>
+            <input name="rating" type="number" min="1" max="5" step="1" inputmode="numeric">
+          </label>
+        </div>
+        <p class="form-error" id="feedback-form-error" role="alert" aria-live="assertive" hidden></p>
+        <div class="dialog-actions">
+          <button class="secondary-button" id="cancel-feedback" type="button">Cancel</button>
+          <button class="primary-button" id="submit-feedback" type="submit">Add feedback</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="delete-dialog" class="confirm-dialog" aria-labelledby="delete-title" aria-describedby="delete-description delete-error">
+    <form method="dialog" id="delete-form">
+      <p class="eyebrow">Permanent action</p>
+      <h2 id="delete-title">Delete this record?</h2>
+      <p id="delete-description">This removes the record from repository memory and cannot be undone.</p>
+      <p class="form-error" id="delete-error" role="alert" aria-live="assertive" hidden></p>
+      <div class="dialog-actions">
+        <button class="secondary-button" id="cancel-delete" type="button">Keep record</button>
+        <button class="danger-button" id="confirm-delete" type="submit">Delete permanently</button>
+      </div>
+    </form>
+  </dialog>
+
+  <noscript>
+    <div class="noscript">Memory Hub needs JavaScript to request records from the local API.</div>
+  </noscript>
+  <div class="sr-only" id="global-status" role="status" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>
