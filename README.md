@@ -1,5 +1,7 @@
 # Memory Hub
 
+[![skills.sh](https://skills.sh/b/AshishSalaskar1/memory-hub)](https://skills.sh/AshishSalaskar1/memory-hub/memory-hub)
+
 Your coding agent starts each new session with a clean slate. The code is still there, but the reasoning behind it often is not.
 
 **Memory Hub gives your repository a memory.** It saves the useful parts of a coding session, such as decisions, constraints, unfinished work, and developer feedback, then brings back only what matters for the next task.
@@ -35,10 +37,10 @@ It stores structured summaries rather than full conversations. The repository re
 From your project directory:
 
 ```bash
-npx skills@latest add <OWNER>/memory-hub-skill
+npx skills@latest add AshishSalaskar1/memory-hub
 ```
 
-Select `memory-hub`, your coding agent, and a project-local installation when prompted. Replace `<OWNER>` with the GitHub owner or organization once this repository is published.
+Select `memory-hub`, your coding agent, and a project-local installation when prompted.
 
 ### 2. Initialize repository memory
 
@@ -233,7 +235,7 @@ Review third-party skills before allowing shell commands. Memory Hub needs shell
 The recommended installer is [skills.sh](https://skills.sh):
 
 ```bash
-npx skills@latest add <OWNER>/memory-hub-skill
+npx skills@latest add AshishSalaskar1/memory-hub
 ```
 
 The installer detects supported agents and lets you choose project or personal scope.
@@ -258,8 +260,8 @@ Personal installations can use:
 GitHub CLI 2.90.0 or newer can install a published skill:
 
 ```bash
-gh skill preview <OWNER>/memory-hub-skill memory-hub
-gh skill install <OWNER>/memory-hub-skill memory-hub
+gh skill preview AshishSalaskar1/memory-hub memory-hub
+gh skill install AshishSalaskar1/memory-hub memory-hub
 ```
 
 Copilot CLI uses the same personal directories. Start a new CLI session after installation so the skill is discovered.
@@ -352,7 +354,7 @@ Feedback uses a separate payload and can reference the repository, a session, or
 The repository keeps each installable skill self-contained:
 
 ```text
-memory-hub-skill/
+memory-hub/
 |-- README.md
 |-- LICENSE
 |-- tests/
