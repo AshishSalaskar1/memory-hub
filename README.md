@@ -10,6 +10,8 @@ Your coding agent starts each new session with a clean slate. The code is still 
 
 Everything stays in the repository. There is no account to create, no cloud service to connect, and no raw transcript archive to manage.
 
+![Memory Hub technical flow from coding session through extraction, storage, search, and relevant context](docs/arch_flow.png)
+
 ## What it feels like
 
 Imagine returning to a project after a few weeks and asking:
