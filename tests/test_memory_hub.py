@@ -170,6 +170,47 @@ class MemoryHubCLITests(unittest.TestCase):
         self.assertEqual(second_config["repository_root"], str(self.repo))
         self.assertEqual(self.status()["sessions"], 0)
 
+    def test_init_configures_instruction_files_idempotently(self):
+        agents = self.repo / "AGENTS.md"
+        agents.write_text("# Existing instructions\n", encoding="utf-8")
+
+        first = self.run_cli(
+            "init", "--instruction-file", "AGENTS.md",
+            "--instruction-file", ".github/copilot-instructions.md",
+        )
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("Proactive context instructions updated", first.stdout)
+        agents_content = agents.read_text(encoding="utf-8")
+        copilot_content = (self.repo / ".github" / "copilot-instructions.md").read_text(encoding="utf-8")
+        self.assertTrue(agents_content.startswith("# Existing instructions\n"))
+        self.assertEqual(agents_content.count("<!-- memory-hub:start -->"), 1)
+        self.assertEqual(copilot_content.count("<!-- memory-hub:start -->"), 1)
+        self.assertIn("three-layer workflow", agents_content)
+        self.assertIn("`search` for a compact index", agents_content)
+        self.assertIn("`timeline` only when sequence", agents_content)
+        self.assertIn("`details` for only the selected record IDs", agents_content)
+
+        second = self.run_cli("init", "--instruction-file", "AGENTS.md")
+
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(agents.read_text(encoding="utf-8"), agents_content)
+        status = self.run_cli("init")
+        self.assertIn("Proactive context instructions already configured", status.stdout)
+        self.assertIn("AGENTS.md", status.stdout)
+        self.assertIn(".github/copilot-instructions.md", status.stdout)
+
+    def test_init_rejects_malformed_instruction_markers_without_overwriting(self):
+        agents = self.repo / "AGENTS.md"
+        original = "# Existing\n\n<!-- memory-hub:start -->\nIncomplete block\n"
+        agents.write_text(original, encoding="utf-8")
+
+        result = self.run_cli("init", "--instruction-file", "AGENTS.md")
+
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("malformed Memory Hub markers", result.stderr)
+        self.assertEqual(agents.read_text(encoding="utf-8"), original)
+
     def test_checkpoint_then_close_reuses_the_active_session(self):
         checkpoint = capture_payload(summary="Checkpoint one")
         checkpoint["checkpoints"] = [{"summary": "Checkpoint one", "open_context": "Continue tests"}]
@@ -304,8 +345,74 @@ class MemoryHubCLITests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLessEqual(len(result.stdout), 220)
-        self.assertIn("Task: lunar parser", result.stdout)
+        self.assertNotIn("Task: lunar parser", result.stdout)
+        self.assertNotIn("Several work items are tracked", result.stdout)
+        self.assertNotIn("- [", result.stdout)
         self.assertIn("Context truncated to --max-chars", result.stdout)
+
+    def test_context_profiles_apply_global_record_limits(self):
+        payload = capture_payload(summary="Unrelated session summary")
+        payload["tasks"] = [
+            {"title": f"Lunar task token{index}", "status": "in-progress", "summary": f"Lunar detail token{index}"}
+            for index in range(20)
+        ]
+        self.assertEqual(self.capture(payload).returncode, 0)
+
+        compact = self.run_cli("context", "--task", "lunar", "--profile", "compact")
+        detailed = self.run_cli("context", "--task", "lunar", "--profile", "detailed")
+
+        self.assertEqual(compact.returncode, 0, compact.stderr)
+        self.assertEqual(detailed.returncode, 0, detailed.stderr)
+        self.assertEqual(compact.stdout.count("\n- "), 12)
+        self.assertEqual(detailed.stdout.count("\n- "), 20)
+        self.assertLessEqual(len(compact.stdout), 5_000)
+
+    def test_context_uses_fts_to_find_relevant_older_records(self):
+        config = json.loads((self.repo / ".memory-hub" / "config.json").read_text(encoding="utf-8"))
+        if not config["fts5"]:
+            self.skipTest("SQLite FTS5 is unavailable")
+        older = capture_payload(summary="Older context fixture")
+        older["decisions"] = [{
+            "title": "Choose heliotrope protocol", "status": "active", "scope": "transport",
+            "rationale": ["Required by the external gateway"],
+        }]
+        self.assertEqual(self.capture(older).returncode, 0)
+        recent = capture_payload(summary="Recent context fixtures")
+        recent["decisions"] = [
+            {
+                "title": f"Recent unrelated choice {index}", "status": "active", "scope": "fixtures",
+                "rationale": [f"Populate candidate window {index}"],
+            }
+            for index in range(65)
+        ]
+        self.assertEqual(self.capture(recent).returncode, 0)
+        database = self.repo / ".memory-hub" / "memory.db"
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE decisions SET created_at='2000-01-01T00:00:00+00:00' WHERE title='Choose heliotrope protocol'"
+            )
+            connection.commit()
+
+        result = self.run_cli("context", "--task", "heliotrope protocol")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Choose heliotrope protocol", result.stdout)
+
+    def test_context_falls_back_when_fts_index_is_empty(self):
+        payload = capture_payload(summary="Fallback fixture")
+        payload["tasks"] = [{
+            "title": "Repair amber parser", "status": "in-progress", "summary": "Handle amber tokens",
+        }]
+        self.assertEqual(self.capture(payload).returncode, 0)
+        database = self.repo / ".memory-hub" / "memory.db"
+        with sqlite3.connect(database) as connection:
+            connection.execute("DROP TABLE IF EXISTS memory_fts")
+            connection.commit()
+
+        result = self.run_cli("context", "--task", "amber parser")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Repair amber parser", result.stdout)
 
     def test_recall_is_task_aware_bounded_and_excludes_superseded_records(self):
         initial = capture_payload(summary="Ranking fixtures")
@@ -357,9 +464,96 @@ class MemoryHubCLITests(unittest.TestCase):
         self.assertEqual(superseded.returncode, 0, superseded.stderr)
         self.assertEqual(json.loads(superseded.stdout)["results"], [])
 
+        concise = self.run_cli("recall", "sharedneedle", "--max-results", "1")
+        self.assertEqual(concise.returncode, 0, concise.stderr)
+        self.assertIn("Relevant to lunar work", concise.stdout)
+
         invalid_bound = self.run_cli("recall", "sharedneedle", "--max-results", "0")
         self.assertEqual(invalid_bound.returncode, 2)
         self.assertIn("--max-results must be at least 1", invalid_bound.stderr)
+
+    def test_layered_search_is_compact_and_details_are_batched(self):
+        payload = capture_payload(summary="Layered retrieval fixture")
+        payload["decisions"] = [{
+            "title": "Keep cobalt tokens server-side", "status": "active", "scope": "authentication",
+            "rationale": ["Prevents browser access to long-lived credentials"],
+            "source": "human", "confirmation": "human-confirmed",
+        }]
+        payload["directions"] = [{
+            "instruction": "Rotate cobalt tokens after use", "status": "active", "scope": "authentication",
+            "origin": "human", "importance": "high", "source": "human", "confirmation": "explicit-human",
+        }]
+        self.assertEqual(self.capture(payload).returncode, 0)
+        decision_id = self.record_id("decisions", "title", "Keep cobalt tokens server-side")
+        direction_id = self.record_id("directions", "instruction", "Rotate cobalt tokens after use")
+
+        search = self.run_cli("search", "cobalt tokens", "--limit", "2", "--json")
+
+        self.assertEqual(search.returncode, 0, search.stderr)
+        results = json.loads(search.stdout)["results"]
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            set(results[0]),
+            {"id", "type", "title", "status", "confirmation", "created_at", "estimated_tokens", "score"},
+        )
+        self.assertNotIn("rationale", results[0])
+        self.assertGreater(results[0]["estimated_tokens"], 0)
+
+        details = self.run_cli("details", direction_id, decision_id, "--json")
+
+        self.assertEqual(details.returncode, 0, details.stderr)
+        records = json.loads(details.stdout)["records"]
+        self.assertEqual([record["id"] for record in records], [direction_id, decision_id])
+        self.assertEqual(records[1]["rationale"], ["Prevents browser access to long-lived credentials"])
+
+    def test_search_supports_type_pagination_and_validation(self):
+        payload = capture_payload(summary="Search filtering fixture")
+        payload["tasks"] = [
+            {"title": f"Quartz task {index}", "status": "planned", "summary": f"Quartz step {index}"}
+            for index in range(3)
+        ]
+        payload["decisions"] = [{
+            "title": "Quartz decision", "status": "active", "scope": "search",
+            "rationale": ["Search fixture"],
+        }]
+        self.assertEqual(self.capture(payload).returncode, 0)
+
+        first = self.run_cli("search", "quartz", "--type", "task", "--limit", "1", "--json")
+        second = self.run_cli("search", "quartz", "--type", "task", "--limit", "1", "--offset", "1", "--json")
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        first_result = json.loads(first.stdout)["results"][0]
+        second_result = json.loads(second.stdout)["results"][0]
+        self.assertEqual(first_result["type"], "tasks")
+        self.assertNotEqual(first_result["id"], second_result["id"])
+        invalid = self.run_cli("search", "quartz", "--limit", "0")
+        self.assertEqual(invalid.returncode, 2)
+        self.assertIn("--limit must be at least 1", invalid.stderr)
+
+    def test_timeline_returns_bounded_same_session_index(self):
+        payload = capture_payload(summary="Timeline fixture")
+        payload["tasks"] = [{"title": "Begin indigo work", "status": "in-progress", "summary": "Prepare parser"}]
+        payload["decisions"] = [{
+            "title": "Choose indigo parser", "status": "active", "scope": "parser",
+            "rationale": ["Deterministic behavior"],
+        }]
+        payload["changes"] = [{"path": "src/parser.py", "kind": "modified", "summary": "Implement indigo parser"}]
+        self.assertEqual(self.capture(payload).returncode, 0)
+        anchor = self.record_id("decisions", "title", "Choose indigo parser")
+
+        timeline = self.run_cli("timeline", anchor, "--before", "1", "--after", "1", "--json")
+
+        self.assertEqual(timeline.returncode, 0, timeline.stderr)
+        events = json.loads(timeline.stdout)["events"]
+        self.assertLessEqual(len(events), 3)
+        self.assertIn(anchor, [event["id"] for event in events])
+        self.assertTrue(all("rationale" not in event for event in events))
+        self.assertTrue(all("estimated_tokens" in event for event in events))
+
+        missing = self.run_cli("timeline", "dec_missing")
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("memory record not found", missing.stderr)
 
     def test_dream_dry_run_does_not_write_and_apply_rebuilds_idempotently(self):
         initial = capture_payload(summary="Dream fixtures")
@@ -519,6 +713,35 @@ class MemoryHubCLITests(unittest.TestCase):
             changed_files = json.loads(connection.execute("SELECT git_changed_files FROM sessions").fetchone()[0])
         self.assertEqual(values, [("Correct", 1), ("Incorrect kind", 0)])
         self.assertEqual(changed_files[0]["path"], "tracked.txt")
+
+    def test_capture_defaults_metadata_and_derives_git_changes_when_omitted(self):
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        tracked = self.repo / "tracked.txt"
+        tracked.write_text("first\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "tracked.txt"], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "initial"],
+            check=True,
+        )
+        tracked.write_text("second\n", encoding="utf-8")
+        payload = {
+            "schema_version": 1,
+            "session": {
+                "mode": "checkpoint", "goal": "Use compact captures",
+                "outcome": "partial", "summary": "Captured semantic work",
+            },
+            "tasks": [{"title": "Compact capture", "status": "in-progress", "summary": "Omit routine metadata"}],
+        }
+
+        result = self.capture(payload)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        database = self.repo / ".memory-hub" / "memory.db"
+        with sqlite3.connect(database) as connection:
+            task = connection.execute("SELECT source,confidence,confirmation FROM tasks").fetchone()
+            change = connection.execute("SELECT path,kind,git_verified,source,confidence,confirmation FROM changes").fetchone()
+        self.assertEqual(task, ("agent", "medium", "agent-inferred"))
+        self.assertEqual(change, ("tracked.txt", "modified", 1, "observed", "high", "not-required"))
 
     def test_server_start_api_reuse_and_stop(self):
         payload = capture_payload(summary="Server-visible state")

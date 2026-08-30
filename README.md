@@ -2,376 +2,195 @@
 
 [![skills.sh](https://skills.sh/b/AshishSalaskar1/memory-hub)](https://skills.sh/AshishSalaskar1/memory-hub/memory-hub)
 
-Your coding agent starts each new session with a clean slate. The code is still there, but the reasoning behind it often is not.
-
-**Memory Hub gives your repository a memory.** It saves the useful parts of a coding session, such as decisions, constraints, unfinished work, and developer feedback, then brings back only what matters for the next task.
+Memory Hub gives a repository durable memory. It records decisions, developer directions, unfinished work, capabilities, and feedback, then retrieves only what matters for the current task.
 
 > Git remembers what changed. Memory Hub remembers why.
 
-Everything stays in the repository. There is no account to create, no cloud service to connect, and no raw transcript archive to manage.
+Memory stays in repository-local SQLite. There is no account, cloud service, telemetry, or raw transcript archive.
 
-![Memory Hub technical flow from coding session through extraction, storage, search, and relevant context](docs/arch_flow.png)
+![Memory Hub technical flow](docs/arch_flow.png)
 
-## What it feels like
+## Quick start
 
-Imagine returning to a project after a few weeks and asking:
-
-```text
-/memory-hub recall why did we choose SQLite?
-```
-
-Instead of searching through old chats, your agent can retrieve the decision, its rationale, and the work it affected.
-
-Memory Hub can help your agent remember:
-
-- Why an architectural choice was made
-- What you asked it to do differently next time
-- Which work is complete, blocked, or still in progress
-- Where a capability lives in the codebase
-- What changed during a long session
-
-It stores structured summaries rather than full conversations. The repository remains the source of truth for code; Memory Hub supplies the missing context around it.
-
-## Try it in five minutes
-
-### 1. Install the skill
-
-From your project directory:
+Install the skill from your project directory:
 
 ```bash
 npx skills@latest add AshishSalaskar1/memory-hub
 ```
 
-Select `memory-hub`, your coding agent, and a project-local installation when prompted.
-
-### 2. Initialize repository memory
-
-Open the project in your agent and run:
+Initialize repository memory:
 
 ```text
 /memory-hub init
 ```
 
-This creates a local `.memory-hub/` directory for the repository.
+Initialization creates `.memory-hub/` and can add a marked retrieval policy to `AGENTS.md`, `CLAUDE.md`, or `.github/copilot-instructions.md`. It never edits an instruction file without approval.
 
-### 3. Save useful progress
-
-During a long session:
+Capture useful progress before context is lost:
 
 ```text
 /memory-hub checkpoint
 ```
 
-When the session is finished:
+Close the logical work session when finished:
 
 ```text
 /memory-hub close
 ```
 
-The agent extracts decisions, directions, changes, open questions, and next steps from the context it still has. You can review consequential or uncertain interpretations before they are stored.
-
-### 4. Pick up where you left off
-
-At the start of a later session:
+Resume later with task-aware context:
 
 ```text
-/memory-hub context add OAuth login
+/memory-hub context implement OAuth logout
 ```
 
-When a specific question comes up:
+Ask a focused historical question:
 
 ```text
 /memory-hub recall why are refresh tokens stored server-side?
 ```
 
-That is the core loop: **initialize once, capture as you work, retrieve when needed.**
+The core loop is simple: **initialize once, capture while context is available, and retrieve when needed.**
 
-## A typical day with Memory Hub
+## Commands
 
-```text
-# Begin with the context that matters for today's task
-/memory-hub context add OAuth login
-
-# Save progress before the conversation gets long
-/memory-hub checkpoint
-
-# Ask about one earlier decision
-/memory-hub recall what authentication constraints did the developer specify?
-
-# Record a correction or suggestion
-/memory-hub feedback
-
-# Finish the session
-/memory-hub close
-```
-
-You can use natural language too. Requests such as `Initialize Memory Hub for this repository`, `Checkpoint this session`, and `Start the local Memory Hub server` allow compatible agents to discover and invoke the skill.
-
-## What you can do
-
-| Command | Use it when you want to... |
+| Command | Purpose |
 |---|---|
-| `/memory-hub init` | Set up memory for a repository |
-| `/memory-hub context [task]` | Get oriented before starting a task |
-| `/memory-hub recall <question>` | Find a specific decision, constraint, or piece of history |
-| `/memory-hub checkpoint` | Save progress without ending the current session |
-| `/memory-hub close` | Save the final state and close the session |
-| `/memory-hub feedback` | Record a correction, concern, suggestion, or positive note |
-| `/memory-hub status` | Check memory health and recent activity |
+| `/memory-hub init` | Initialize repository memory and optionally configure agent instructions |
+| `/memory-hub checkpoint` | Save progress without closing the current session |
+| `/memory-hub close` | Save final progress and close the session |
+| `/memory-hub context [task]` | Load a compact context pack for a known task |
+| `/memory-hub recall <question>` | Answer a focused historical question |
+| `/memory-hub search <query>` | List compact matching memories without full details |
+| `/memory-hub timeline <record-id>` | Show work surrounding one memory |
+| `/memory-hub details <record-id>...` | Fetch complete selected records in one batch |
+| `/memory-hub feedback` | Store a correction, concern, suggestion, or positive note |
+| `/memory-hub status` | Show memory health and recent activity |
 | `/memory-hub dream` | Audit the store and preview safe repairs |
-| `/memory-hub export` | Generate readable Markdown exports on disk |
-| `/memory-hub server` | Browse, review, edit, export, and migrate repository memory in a local web interface |
-| `/memory-hub stop` | Stop the local web interface |
+| `/memory-hub export [target]` | Generate readable Markdown exports |
+| `/memory-hub server` | Open the local browser interface |
+| `/memory-hub stop` | Stop the local browser interface |
 
-If your agent does not accept arguments after a slash command, put the request on the next line:
+Natural-language requests work too, such as `Checkpoint this session` or `Recall why SQLite was chosen`.
+
+## Retrieval
+
+Memory Hub has two direct retrieval commands and a fine-grained three-layer workflow.
+
+| Need | Use |
+|---|---|
+| Broad orientation for a known, substantial task | `context` |
+| One specific historical answer | `recall` |
+| A survey of potentially relevant memories | `search` |
+| The sequence around a selected memory | `search`, then `timeline` |
+| Full rationale, evidence, or record fields | `search`, then `details` |
+
+### Direct retrieval
+
+`context` creates a ranked task context containing active decisions, developer directions, capabilities, relevant files, and open work:
 
 ```text
-/memory-hub
-Retrieve context for implementing Markdown export.
+/memory-hub context implement Markdown export
 ```
 
-## How it works
+Compact mode is the default: up to 12 records and 5,000 characters. Use `--profile standard` or `--profile detailed` only when more context is justified.
 
-Memory Hub splits the work between your coding agent and a small local script:
+`recall` returns complete matches for a focused question:
 
-1. The agent reads the conversation and extracts useful knowledge while it is still available.
-2. The bundled Python script validates that capture and stores it in repository-local SQLite.
-3. Later, task-aware search returns a small, ranked context pack instead of dumping every past session into the prompt.
-4. Git supplies verifiable repository facts such as the current branch, commit, dirty state, and changed files.
+```text
+/memory-hub recall what authentication constraints did the developer specify?
+```
 
-This separation matters. The agent handles meaning; deterministic code handles storage, retrieval, IDs, timestamps, and data integrity.
+### Three-layer retrieval
 
-Memory Hub does not inspect proprietary agent session databases and cannot recover a conversation after its context has already been lost. Run `checkpoint` before that happens.
+When relevance is uncertain, peel memory progressively:
 
-## Explore your memory
+```text
+# 1. Survey a compact index
+/memory-hub search token revocation
 
-Start the local browser:
+# 2. Inspect surrounding work if sequence matters
+/memory-hub timeline dec_01abc123
+
+# 3. Fetch only the selected complete records
+/memory-hub details dec_01abc123 fdb_01def456
+```
+
+1. `search` returns IDs, types, titles, status, confirmation, date, score, and estimated detail cost. It does not return full rationale or body fields.
+2. `timeline` returns a bounded window from the anchor record's captured work session.
+3. `details` returns complete records and accepts multiple IDs in one request.
+
+Stop after any layer that provides enough information. Start with a small search limit, use timeline only when chronology matters, and batch selected IDs into one details request.
+
+The underlying CLI supports:
+
+```text
+search:   <query> [--task <task>] [--limit N] [--offset N] [--type <type>] [--json]
+timeline: <record-id> [--before N] [--after N] [--json]
+details:  <record-id>... [--json]
+```
+
+Superseded records are excluded from normal search and recall. Retrieved memory is supporting context; current code, tests, and explicit developer instructions remain authoritative.
+
+## Capture
+
+`checkpoint` and `close` can preserve:
+
+- Completed and in-progress tasks
+- Decisions and rationale
+- Developer instructions and corrections
+- Changed files and Git evidence
+- Capabilities, blockers, questions, and next steps
+
+Memory Hub stores structured summaries, not conversations. The agent handles semantic extraction and uncertainty; the local runtime validates and stores records, IDs, timestamps, provenance, and Git facts.
+
+Run `checkpoint` while the useful context is still available. Memory Hub does not inspect proprietary agent session databases and cannot reconstruct context after it has been lost.
+
+## Agent instructions
+
+`init` can maintain this policy inside a supported instruction file:
+
+```markdown
+<!-- memory-hub:start -->
+## Repository Memory
+
+When `.memory-hub/memory.db` exists, load the installed `memory-hub` skill before work that depends on repository history, architecture, conventions, prior decisions, or unresolved work.
+
+Choose the smallest retrieval path that answers the need:
+
+1. Use compact `context` for broad orientation at the start of a known, substantial task.
+2. Use `recall` for a focused historical question when a direct answer is sufficient.
+3. When relevance is uncertain, use the three-layer workflow: `search` for a compact index, `timeline` only when sequence or surrounding work matters, then `details` for only the selected record IDs.
+
+Start with small search limits, batch IDs in one `details` request, and stop retrieving when enough evidence is available. Skip retrieval for isolated fixes, trivial requests, and unrelated work.
+
+Treat memory as supporting context. Current code, tests, and explicit developer instructions remain authoritative; verify implementation claims against the repository.
+<!-- memory-hub:end -->
+```
+
+The markers let repeated initialization update the block without duplicating it.
+
+## Local browser
+
+Start the browser with:
 
 ```text
 /memory-hub server
 ```
 
-Memory Hub returns a URL such as `http://127.0.0.1:47321`. The browser includes an overview, sessions, timeline, search, decisions, capabilities, developer directions, feedback, open work, exports, and built-in help. Dialogs and detail ledgers are scrollable on desktop and mobile, so long records and their action buttons remain accessible.
+It provides repository overview, sessions, timeline, search, decisions, directions, capabilities, feedback, open work, editing, and exports.
 
-![Memory Hub repository overview showing recent decisions and open work](screenshots/Screenshot_20260830_003256.png)
+![Memory Hub repository overview](screenshots/Screenshot_20260830_003256.png)
 
-### Inspect each session
-
-The **Sessions** view shows every captured work session with its goal, summary, outcome, agent, timestamps, and extracted-record counts. Open a session to see what was done and review the data extracted into each section:
-
-- Checkpoints
-- Tasks
-- Changes
-- Decisions
-- Developer directions
-- Capabilities
-- Open loops
-- Evidence
-- Relationships
-- Feedback
-
-Empty sections remain visible so it is clear what was and was not extracted. Relationship entries are labeled from their source record, relationship type, and target record instead of appearing untitled. Individual records open into their complete ledger; supported memory fields can be edited, and unreferenced records can be deleted.
-
-### Follow the history
-
-The timeline keeps sessions, checkpoints, changes, and decisions in chronological order.
-
-![Memory Hub timeline showing a session and its recorded changes](screenshots/Screenshot_20260830_003322.png)
-
-### Revisit decisions and directions
-
-Dedicated views preserve technical decisions with their rationale and the developer guidance that should shape future work.
-
-| Decisions | Developer directions |
-|---|---|
-| ![Memory Hub decisions view showing rationale, alternatives, and trade-offs](screenshots/Screenshot_20260830_003338.png) | ![Memory Hub developer directions view showing retained human guidance](screenshots/Screenshot_20260830_003350.png) |
-
-### Export or migrate from the browser
-
-Select **Export** from any browser view to download one of three formats:
-
-| Format | Contents | Best for |
-|---|---|---|
-| HTML | One standalone, readable document | Opening in a browser, sharing a report, or archiving a human-readable snapshot |
-| Markdown | A ZIP containing repository summaries and one Markdown file per session | Documentation, review, and selective version control |
-| Artifact | A ZIP containing a consistent `memory.db` snapshot, `config.json`, and a migration manifest | Moving the complete structured store to another checkout or repository path |
-
-To migrate an artifact, extract `memory.db` into the target repository's `.memory-hub/` directory and run `/memory-hub init`. If the snapshot contains one repository, initialization adopts that memory at the new path and refreshes local repository metadata without removing its sessions or records.
-
-The **Help** view explains the main capture, retrieval, review, feedback, confidence, export, privacy, and consolidation workflows inside the browser.
-
-The server binds only to `127.0.0.1`. It has no telemetry and does not synchronize data to the cloud. Stop it with:
+Exports are available as standalone HTML, a Markdown ZIP, or a portable artifact containing a consistent database snapshot. The browser binds only to `127.0.0.1`.
 
 ```text
 /memory-hub stop
 ```
 
-## Command details
+## Storage and requirements
 
-### Capture work with `checkpoint` and `close`
-
-Both commands can capture:
-
-- Completed and in-progress tasks
-- Decisions and rationale
-- Developer instructions and corrections
-- Changed files and available Git evidence
-- New or changed capabilities
-- Blockers, questions, and next steps
-
-`checkpoint` keeps the logical session open, so later captures remain connected to it. `close` records the final state and closes the session. Earlier checkpoints are retained.
-
-The agent distinguishes observed facts, your explicit statements, and its own interpretations. It should ask before persisting a consequential claim when your intent is unclear.
-
-### Retrieve context with `context` and `recall`
-
-Use `context` once near the beginning of substantial work:
-
-```text
-/memory-hub context
-/memory-hub context implement Markdown export
-```
-
-It prioritizes active decisions, human-confirmed directions, relevant capabilities and files, open work, and blockers. Results are deliberately bounded.
-
-Use `recall` for focused questions during implementation:
-
-```text
-/memory-hub recall why did we choose SQLite?
-/memory-hub recall authentication constraints for the OAuth task
-```
-
-Search ranking considers the question, the current task, title matches, status, human confirmation, and recency. Superseded memories are excluded from normal retrieval.
-
-### Record human feedback
-
-Run:
-
-```text
-/memory-hub feedback
-```
-
-The agent asks one question at a time about the feedback type, scope, target, sentiment, and optional rating. You review a short summary before saving it.
-
-Feedback can apply to the repository, a session, or a specific memory record. It remains an explicit human signal; it does not silently rewrite the record it references.
-
-### Check, audit, and export
-
-```text
-/memory-hub status
-/memory-hub dream
-/memory-hub export
-/memory-hub export decisions
-/memory-hub export session <SESSION_ID>
-```
-
-`status` reports recent activity, active decisions, open work, feedback, and unconfirmed memories.
-
-`dream` audits the memory store. By default it is a dry run that reports index issues, dangling references, relationship inconsistencies, and exact duplicate candidates. After you approve the report, `/memory-hub dream apply` can rebuild the search index and make mechanically safe repairs. It does not merge similar records, delete history, or invent rationale.
-
-The command-line `export` writes browsable Markdown under `.memory-hub/exports/`. The browser also offers downloadable HTML, a Markdown ZIP, and a portable migration artifact. SQLite remains authoritative, so editing an HTML or Markdown export does not change stored memory.
-
-## Installation options
-
-Memory Hub follows the open [Agent Skills](https://agentskills.io) format. Install the complete `skills/memory-hub/` directory, not only `SKILL.md`; the skill also needs its `scripts/`, `references/`, and `assets/` directories.
-
-Review third-party skills before allowing shell commands. Memory Hub needs shell access in full mode to run its bundled Python script and inspect Git state.
-
-### skills.sh
-
-The recommended installer is [skills.sh](https://skills.sh):
-
-```bash
-npx skills@latest add AshishSalaskar1/memory-hub
-```
-
-The installer detects supported agents and lets you choose project or personal scope.
-
-### GitHub Copilot
-
-Project installations are discovered in:
-
-```text
-.github/skills/memory-hub/
-.agents/skills/memory-hub/
-.claude/skills/memory-hub/
-```
-
-Personal installations can use:
-
-```text
-~/.copilot/skills/memory-hub/
-~/.agents/skills/memory-hub/
-```
-
-GitHub CLI 2.90.0 or newer can install a published skill:
-
-```bash
-gh skill preview AshishSalaskar1/memory-hub memory-hub
-gh skill install AshishSalaskar1/memory-hub memory-hub
-```
-
-Copilot CLI uses the same personal directories. Start a new CLI session after installation so the skill is discovered.
-
-### OpenCode
-
-Project installations are discovered in:
-
-```text
-.opencode/skills/memory-hub/
-.agents/skills/memory-hub/
-.claude/skills/memory-hub/
-```
-
-Global installations can use:
-
-```text
-~/.config/opencode/skills/memory-hub/
-~/.agents/skills/memory-hub/
-~/.claude/skills/memory-hub/
-```
-
-Restart OpenCode after installation. If your permission settings restrict skills or shell commands, allow `memory-hub` and approve its Python and Git operations.
-
-### Claude Code
-
-Use `.claude/skills/memory-hub/` for one project or `~/.claude/skills/memory-hub/` for all projects. You can select Claude Code in the skills.sh installer or place the complete skill directory there manually.
-
-### Codex and other compatible agents
-
-Many Agent Skills-compatible tools use:
-
-```text
-.agents/skills/memory-hub/
-~/.agents/skills/memory-hub/
-```
-
-The skills.sh installer also supports hosts such as Codex, Cursor, Windsurf, and Gemini CLI. Choose the project path to keep memory tooling scoped to one repository or the home path to make the skill available across projects.
-
-After installation, the skill directory should look like this:
-
-```text
-memory-hub/
-|-- SKILL.md
-|-- scripts/memory_hub.py
-|-- references/
-`-- assets/web/
-```
-
-## Requirements and reduced mode
-
-Full mode requires:
-
-- Python 3.10 or newer
-- Git for repository metadata and change verification
-- An agent that supports the Agent Skills format
-- Permission for the agent to run the bundled Python script
-
-Without Python, Git, or shell access, Memory Hub can still prepare a structured capture and Markdown summary in the conversation. It cannot persist or retrieve SQLite memory, verify Git state, export the database, or run the browser. The agent will say when it has switched to this reduced mode.
-
-## Storage and privacy
-
-Repository memory lives under:
+Repository memory lives in:
 
 ```text
 .memory-hub/
@@ -381,37 +200,21 @@ Repository memory lives under:
 `-- server.json
 ```
 
-`memory.db` is the source of truth. HTML and Markdown exports are generated views. Portable artifacts contain a consistent database snapshot for migration. `server.json` identifies the local browser process so Memory Hub can stop only the server it started.
+`memory.db` is authoritative. Exports are generated views and should not be edited as a persistence mechanism.
 
-Memory Hub is local-first. It has no required cloud account, cloud synchronization, or telemetry. It stores extracted knowledge rather than raw transcripts. Suspected secrets should be redacted before capture.
+Full mode requires Python 3.10+, Git, an Agent Skills-compatible host, and permission to run the bundled script. Without those capabilities, Memory Hub can prepare capture data in the conversation but cannot persist, retrieve, verify Git state, export, or run the browser.
 
-You decide whether `.memory-hub/` stays untracked or whether selected Markdown exports belong in version control. The SQLite database may contain internal project context, so review it before sharing.
+Review the database before sharing it because repository memory may contain internal project context. Suspected secrets are rejected during capture.
 
-## Technical reference
+## Reference
 
-Memory Hub uses capture schema version 1. Captures can contain sessions, tasks, changes, decisions, directions, capabilities, open loops, evidence, and relationships. Provenance and confirmation fields keep agent interpretations separate from observed and human-confirmed facts.
-
-Feedback uses a separate payload and can reference the repository, a session, or a memory record without mutating that target.
-
-- [SKILL.md](skills/memory-hub/SKILL.md) defines the executable agent contract.
-- [Capture schema](skills/memory-hub/references/capture-schema.md) documents version 1 JSON.
-- [Memory types](skills/memory-hub/references/memory-types.md) explains semantics and authority.
-- [Workflows](skills/memory-hub/references/workflows.md) covers actions and failure behavior.
-
-The repository keeps each installable skill self-contained:
-
-```text
-memory-hub/
-|-- README.md
-|-- LICENSE
-|-- tests/
-`-- skills/
-    `-- memory-hub/
-        |-- SKILL.md
-        |-- scripts/
-        |-- references/
-        `-- assets/web/
-```
+- [Agent contract](skills/memory-hub/SKILL.md)
+- [Capture schema](skills/memory-hub/references/capture-schema.md)
+- [Memory types and authority](skills/memory-hub/references/memory-types.md)
+- [Capture workflow](skills/memory-hub/references/capture.md)
+- [Retrieval workflow](skills/memory-hub/references/retrieval.md)
+- [Feedback workflow](skills/memory-hub/references/feedback.md)
+- [Administration](skills/memory-hub/references/admin.md)
 
 ## Development
 

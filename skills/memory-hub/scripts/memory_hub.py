@@ -32,8 +32,30 @@ APP_VERSION = "1.0"
 # Capture payloads remain version 1; database migrations are versioned separately.
 SCHEMA_VERSION = 1
 DB_SCHEMA_VERSION = 3
-DEFAULT_MAX_CHARS = 12_000
+CONTEXT_PROFILES = {
+    "compact": {"max_chars": 5_000, "max_records": 12},
+    "standard": {"max_chars": 8_000, "max_records": 20},
+    "detailed": {"max_chars": 12_000, "max_records": 35},
+}
 MAX_JSON_BODY = 1024 * 1024
+INSTRUCTION_FILES = {"AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md"}
+INSTRUCTION_START = "<!-- memory-hub:start -->"
+INSTRUCTION_END = "<!-- memory-hub:end -->"
+INSTRUCTION_BLOCK = f"""{INSTRUCTION_START}
+## Repository Memory
+
+When `.memory-hub/memory.db` exists, load the installed `memory-hub` skill before work that depends on repository history, architecture, conventions, prior decisions, or unresolved work.
+
+Choose the smallest retrieval path that answers the need:
+
+1. Use compact `context` for broad orientation at the start of a known, substantial task.
+2. Use `recall` for a focused historical question when a direct answer is sufficient.
+3. When relevance is uncertain, use the three-layer workflow: `search` for a compact index, `timeline` only when sequence or surrounding work matters, then `details` for only the selected record IDs.
+
+Start with small search limits, batch IDs in one `details` request, and stop retrieving when enough evidence is available. Skip retrieval for isolated fixes, trivial requests, and unrelated work.
+
+Treat memory as supporting context. Current code, tests, and explicit developer instructions remain authoritative; verify implementation claims against the repository.
+{INSTRUCTION_END}"""
 TOP_ARRAYS = (
     "checkpoints", "tasks", "changes", "decisions", "directions",
     "capabilities", "open_loops", "evidence", "relationships",
@@ -327,7 +349,52 @@ def repository_row(connection: sqlite3.Connection, root: Path) -> sqlite3.Row:
     return row
 
 
-def operation_init(root: Path) -> None:
+def configure_instruction_file(root: Path, relative_path: str) -> str:
+    if relative_path not in INSTRUCTION_FILES:
+        raise ValidationError(f"unsupported instruction file: {relative_path}")
+    target = root / relative_path
+    if target.is_symlink():
+        raise ValidationError(f"instruction file must not be a symbolic link: {relative_path}")
+    if target.exists() and not target.is_file():
+        raise ValidationError(f"instruction path is not a file: {relative_path}")
+    try:
+        existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    except (OSError, UnicodeError) as exc:
+        raise MemoryHubError(f"cannot read instruction file {target}: {exc}") from exc
+    start = existing.find(INSTRUCTION_START)
+    end = existing.find(INSTRUCTION_END)
+    if (start < 0) != (end < 0) or (start >= 0 and end < start):
+        raise ValidationError(f"instruction file has malformed Memory Hub markers: {relative_path}")
+    if start >= 0:
+        end += len(INSTRUCTION_END)
+        updated = existing[:start] + INSTRUCTION_BLOCK + existing[end:]
+    else:
+        separator = "" if not existing else "\n\n" if not existing.endswith("\n") else "\n"
+        updated = existing + separator + INSTRUCTION_BLOCK + "\n"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(updated, encoding="utf-8")
+    except OSError as exc:
+        raise MemoryHubError(f"cannot write instruction file {target}: {exc}") from exc
+    return relative_path
+
+
+def configured_instruction_files(root: Path) -> list[str]:
+    configured = []
+    for relative_path in sorted(INSTRUCTION_FILES):
+        target = root / relative_path
+        if not target.is_file() or target.is_symlink():
+            continue
+        try:
+            content = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if INSTRUCTION_START in content and INSTRUCTION_END in content:
+            configured.append(relative_path)
+    return configured
+
+
+def operation_init(root: Path, instruction_files: list[str]) -> None:
     hub, database, config_path, _ = paths(root)
     hub.mkdir(mode=0o700, exist_ok=True)
     (hub / "exports").mkdir(exist_ok=True)
@@ -367,8 +434,16 @@ def operation_init(root: Path) -> None:
         except (OSError, ValueError):
             pass
     atomic_json(config_path, config)
+    updated_files = [configure_instruction_file(root, item) for item in dict.fromkeys(instruction_files)]
+    configured_files = configured_instruction_files(root)
     mode = "Git metadata recorded" if metadata["available"] else "Git metadata unavailable (non-Git directory)"
     print(f"Memory Hub initialized at {hub}\n{mode}\nDatabase: {database}")
+    if updated_files:
+        print("Proactive context instructions updated: " + ", ".join(updated_files))
+    elif configured_files:
+        print("Proactive context instructions already configured: " + ", ".join(configured_files))
+    else:
+        print("Proactive context instructions: not configured")
 
 
 COMMON = {"id", "scope", "source", "confidence", "confirmation", "status", "evidence_ids", "supersedes"}
@@ -453,11 +528,13 @@ def validate_payload(payload: object, connection: sqlite3.Connection, repository
     detect_secret(payload)
     expected_top = {"schema_version", "session", *TOP_ARRAYS}
     unknown = set(payload) - expected_top
-    missing = expected_top - set(payload)
+    missing = {"schema_version", "session"} - set(payload)
     if unknown:
         fail(next(iter(sorted(unknown))), "unknown top-level field")
     if missing:
         fail(next(iter(sorted(missing))), "required field is missing")
+    for table in TOP_ARRAYS:
+        payload.setdefault(table, [])
     if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
         fail("schema_version", "expected integer 1")
     session = payload["session"]
@@ -489,6 +566,20 @@ def validate_payload(payload: object, connection: sqlite3.Connection, repository
             base = f"{table}[{index}]"
             if not isinstance(record, dict):
                 fail(base, "expected an object")
+            if table == "relationships":
+                defaults = None
+            elif table == "changes":
+                defaults = ("observed", "high", "not-required")
+            elif table == "directions" and record.get("origin") == "human":
+                defaults = ("human", "high", "explicit-human")
+            elif table == "evidence" and record.get("kind") in {"git", "file", "test", "tool-output"}:
+                defaults = ("observed", "high", "not-required")
+            else:
+                defaults = ("agent", "medium", "agent-inferred")
+            if defaults:
+                record.setdefault("source", defaults[0])
+                record.setdefault("confidence", defaults[1])
+                record.setdefault("confirmation", defaults[2])
             unknown_fields = set(record) - spec["optional"]
             if unknown_fields:
                 fail(f"{base}.{next(iter(sorted(unknown_fields)))}", "unknown field")
@@ -785,8 +876,22 @@ def operation_capture(root: Path, input_path: Path) -> None:
     try:
         migrate(connection)
         repository = repository_row(connection, root)
-        payload = validate_payload(payload, connection, repository["id"])
         metadata = git_metadata(root)
+        changes_supplied = isinstance(payload, dict) and "changes" in payload
+        payload = validate_payload(payload, connection, repository["id"])
+        if not changes_supplied and metadata["available"]:
+            payload["changes"] = [
+                {
+                    "path": item["path"],
+                    "kind": git_change_kind(item["status"]),
+                    "summary": "Git-reported working tree change.",
+                    **({"old_path": item["old_path"]} if item.get("old_path") else {}),
+                    "source": "observed",
+                    "confidence": "high",
+                    "confirmation": "not-required",
+                }
+                for item in metadata["changed_files"]
+            ]
         stamp = now()
         counts = {table: len(payload[table]) for table in TOP_ARRAYS}
         with connection:
@@ -1005,53 +1110,101 @@ def words(value: str) -> set[str]:
     return {word for word in re.findall(r"[a-z0-9_./-]{2,}", value.lower()) if word not in {"the", "and", "for", "with", "from", "this", "that"}}
 
 
-def context_records(connection: sqlite3.Connection, rid: int, task: str) -> dict[str, list[dict[str, object]]]:
-    selected = {
-        "decisions": rows(connection, "decisions", "repository_id=? AND superseded_by_id IS NULL AND status IN ('active','proposed','needs-review')", (rid,), 60),
-        "directions": rows(connection, "directions", "repository_id=? AND superseded_by_id IS NULL AND status='active'", (rid,), 60),
-        "capabilities": rows(connection, "capabilities", "repository_id=? AND superseded_by_id IS NULL AND status!='deprecated'", (rid,), 60),
-        "open_loops": rows(connection, "open_loops", "repository_id=? AND superseded_by_id IS NULL AND status IN ('open','blocked','deferred')", (rid,), 60),
-        "tasks": rows(connection, "tasks", "repository_id=? AND superseded_by_id IS NULL AND status IN ('planned','in-progress','blocked','deferred')", (rid,), 40),
-        "changes": rows(connection, "changes", "repository_id=? AND superseded_by_id IS NULL", (rid,), 30),
-        "feedback": rows(connection, "feedback", "repository_id=? AND type IN ('correction','suggestion','concern','positive')", (rid,), 30),
+def context_fts_candidates(connection: sqlite3.Connection, task: str, maximum: int = 120) -> dict[str, dict[str, int]]:
+    terms = sorted(words(task))
+    if not terms:
+        return {}
+    query = " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms)
+    try:
+        matches = connection.execute(
+            "SELECT memory_type,public_id,bm25(memory_fts) AS rank FROM memory_fts WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?",
+            (query, maximum),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    candidates: dict[str, dict[str, int]] = {}
+    for index, match in enumerate(matches):
+        if match["memory_type"] not in {"decisions", "directions", "capabilities", "open_loops", "tasks", "changes", "feedback"}:
+            continue
+        candidates.setdefault(match["memory_type"], {})[match["public_id"]] = max(1, 12 - index // 10)
+    return candidates
+
+
+def context_record_score(
+    record: dict[str, object], table: str, query_words: set[str], fts_relevance: int = 0,
+) -> tuple[int, str]:
+    text = json.dumps(record).lower()
+    relevance = sum(4 for term in query_words if term in text)
+    relevance += 3 if record.get("confirmation") in {"human-confirmed", "explicit-human"} else 0
+    relevance += 2 if record.get("status") in {"active", "open", "in-progress", "implemented"} else 0
+    if table == "feedback":
+        relevance += 5 if record.get("type") == "correction" else 3 if record.get("type") == "suggestion" else 1
+    return relevance + fts_relevance, str(record.get("created_at", ""))
+
+
+def context_records(
+    connection: sqlite3.Connection, rid: int, task: str, maximum: int,
+) -> dict[str, list[dict[str, object]]]:
+    filters: dict[str, tuple[str, int]] = {
+        "decisions": ("repository_id=? AND superseded_by_id IS NULL AND status IN ('active','proposed','needs-review')", 60),
+        "directions": ("repository_id=? AND superseded_by_id IS NULL AND status='active'", 60),
+        "capabilities": ("repository_id=? AND superseded_by_id IS NULL AND status!='deprecated'", 60),
+        "open_loops": ("repository_id=? AND superseded_by_id IS NULL AND status IN ('open','blocked','deferred')", 60),
+        "tasks": ("repository_id=? AND superseded_by_id IS NULL AND status IN ('planned','in-progress','blocked','deferred')", 40),
+        "changes": ("repository_id=? AND superseded_by_id IS NULL", 30),
+        "feedback": ("repository_id=? AND type IN ('correction','suggestion','concern','positive')", 30),
     }
+    selected = {table: rows(connection, table, where, (rid,), limit) for table, (where, limit) in filters.items()}
+    fts_candidates = context_fts_candidates(connection, task)
+    for table, identifiers in fts_candidates.items():
+        known = {str(record["id"]) for record in selected[table]}
+        missing = [identifier for identifier in identifiers if identifier not in known]
+        if not missing:
+            continue
+        placeholders = ",".join("?" for _ in missing)
+        where = f"{filters[table][0]} AND public_id IN ({placeholders})"
+        selected[table].extend(rows(connection, table, where, (rid, *missing)))
     query_words = words(task)
+    ranked: list[tuple[tuple[int, str], str, dict[str, object]]] = []
     for table, records in selected.items():
-        def score(record: dict[str, object]) -> tuple[int, str]:
-            text = json.dumps(record).lower()
-            relevance = sum(4 for term in query_words if term in text)
-            relevance += 3 if record.get("confirmation") in {"human-confirmed", "explicit-human"} else 0
-            relevance += 2 if record.get("status") in {"active", "open", "in-progress", "implemented"} else 0
-            if table == "feedback":
-                relevance += 5 if record.get("type") == "correction" else 3 if record.get("type") == "suggestion" else 1
-            return relevance, str(record.get("created_at", ""))
-        records.sort(key=score, reverse=True)
-        if task:
-            relevant = [record for record in records if score(record)[0] >= 4]
-            if table == "directions":
-                relevant.extend(record for record in records if record not in relevant and record.get("scope") == "repository" and record.get("confirmation") in {"human-confirmed", "explicit-human"})
-            if table == "feedback":
-                relevant.extend(record for record in records if record not in relevant and record.get("type") in {"correction", "suggestion"})
-            selected[table] = relevant[:8]
-        else:
-            selected[table] = records[:3] if table == "feedback" else records[:5]
-    return selected
+        for record in records:
+            score = context_record_score(
+                record, table, query_words,
+                fts_candidates.get(table, {}).get(str(record["id"]), 0),
+            )
+            global_direction = table == "directions" and record.get("scope") == "repository" and record.get("confirmation") in {"human-confirmed", "explicit-human"}
+            important_feedback = table == "feedback" and record.get("type") in {"correction", "suggestion"}
+            if not task or score[0] >= 4 or global_direction or important_feedback:
+                ranked.append((score, table, record))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+
+    result = {table: [] for table in selected}
+    fingerprints: list[set[str]] = []
+    for _, table, record in ranked:
+        text = " ".join((record_title(record), str(record.get("summary") or record.get("body") or "")))
+        fingerprint = words(text)
+        if fingerprint and any(len(fingerprint & known) / len(fingerprint | known) >= 0.8 for known in fingerprints):
+            continue
+        result[table].append(record)
+        fingerprints.append(fingerprint)
+        if sum(len(records) for records in result.values()) >= maximum:
+            break
+    return result
 
 
-def render_context(root: Path, task: str, maximum: int) -> str:
+def render_context(root: Path, task: str, maximum: int, max_records: int) -> str:
     connection = connect(require_initialized(root))
     try:
         migrate(connection)
         repo = repository_row(connection, root)
-        data = context_records(connection, repo["id"], task)
+        data = context_records(connection, repo["id"], task, max_records)
         recent = rows(connection, "sessions", "repository_id=?", (repo["id"],), 1)
     finally:
         connection.close()
     sections = ["# Memory Hub Context", f"Repository: {repo['name']}"]
-    if task:
-        sections.append(f"Task: {task}")
     if recent:
-        sections.extend(["\n## Current State", recent[0]["summary"]])
+        if not task or words(str(recent[0]["summary"])) & words(task):
+            sections.extend(["\n## Current State", recent[0]["summary"]])
     headings = {
         "decisions": "Relevant Decisions", "directions": "Developer Directions",
         "capabilities": "Capabilities", "open_loops": "Open Work", "tasks": "Active Tasks", "changes": "Relevant Files",
@@ -1061,32 +1214,41 @@ def render_context(root: Path, task: str, maximum: int) -> str:
         records = data[table]
         if not records:
             continue
-        sections.append(f"\n## {heading}")
+        record_lines = []
         for record in records:
             title = record.get("title") or record.get("instruction") or record.get("name") or record.get("path") or record.get("type")
             detail = record.get("summary") or record.get("rationale") or record.get("body") or ""
             if isinstance(detail, list):
                 detail = "; ".join(detail)
             label = record.get("status") or record.get("sentiment") or "record"
-            sections.append(f"- [{label}] {title}: {detail}".rstrip(": "))
-    output = "\n".join(str(part) for part in sections) + "\n"
-    if len(output) <= maximum:
-        return output
+            record_lines.append(f"- {record['id']} [{label}] {title}: {detail}".rstrip(": "))
+        sections.append(f"\n## {heading}\n" + "\n".join(record_lines))
+    output_parts: list[str] = []
     marker = "\n\n[Context truncated to --max-chars]\n"
-    return output[: max(0, maximum - len(marker))].rstrip() + marker
+    for section in sections:
+        candidate = "\n".join((*output_parts, str(section))) + "\n"
+        if len(candidate) > maximum:
+            return "\n".join(output_parts).rstrip() + marker
+        output_parts.append(str(section))
+    return "\n".join(output_parts) + "\n"
 
 
-def operation_context(root: Path, task: str, maximum: int) -> None:
+def operation_context(root: Path, task: str, maximum: int | None, profile: str) -> None:
+    settings = CONTEXT_PROFILES[profile]
+    maximum = maximum or settings["max_chars"]
     if maximum < 200:
         raise MemoryHubError("--max-chars must be at least 200")
-    print(render_context(root, task, maximum), end="")
+    print(render_context(root, task, maximum, settings["max_records"]), end="")
 
 
 def record_title(record: dict[str, object]) -> str:
     return str(record.get("title") or record.get("name") or record.get("instruction") or record.get("path") or record.get("summary") or record.get("body") or "")
 
 
-def search_records(connection: sqlite3.Connection, repository_id: int, query: str, task: str, maximum: int) -> list[dict[str, object]]:
+def search_records(
+    connection: sqlite3.Connection, repository_id: int, query: str, task: str,
+    maximum: int, record_type: str | None = None, offset: int = 0,
+) -> list[dict[str, object]]:
     query_terms = words(query)
     task_terms = words(task)
     if not query_terms or maximum < 1:
@@ -1094,7 +1256,8 @@ def search_records(connection: sqlite3.Connection, repository_id: int, query: st
     active = {"active", "open", "in-progress", "implemented", "planned", "proposed", "blocked", "partial"}
     ranked: list[tuple[tuple[object, ...], dict[str, object]]] = []
     normalized_query = " ".join(query.lower().split())
-    for table in ("sessions", *ENTITY_TABLES, "feedback"):
+    tables = (record_type,) if record_type else ("sessions", *ENTITY_TABLES, "feedback")
+    for table in tables:
         where = "repository_id=?" if table in {"sessions", "feedback"} else "repository_id=? AND superseded_by_id IS NULL"
         for record in rows(connection, table, where, (repository_id,)):
             text = json.dumps(record, ensure_ascii=False).lower()
@@ -1112,9 +1275,146 @@ def search_records(connection: sqlite3.Connection, repository_id: int, query: st
             result["result_type"] = table
             result["title"] = title
             result["score"] = score
-            ranked.append(((score, str(record.get("created_at") or ""), table, str(record["id"])), result))
+            ranked.append(((score, str(record.get("created_at") or ""), table, title.lower()), result))
     ranked.sort(key=lambda item: item[0], reverse=True)
-    return [record for _, record in ranked[:maximum]]
+    return [record for _, record in ranked[offset:offset + maximum]]
+
+
+def estimate_tokens(record: dict[str, object]) -> int:
+    return max(1, round(len(json.dumps(record, ensure_ascii=False, separators=(",", ":"))) / 4))
+
+
+def compact_record(record: dict[str, object]) -> dict[str, object]:
+    result = {
+        "id": record["id"], "type": record["result_type"], "title": record["title"],
+        "status": record.get("status"), "confirmation": record.get("confirmation"),
+        "created_at": record.get("created_at") or record.get("started_at"),
+        "estimated_tokens": estimate_tokens(record), "score": record.get("score"),
+    }
+    paths = record.get("file_paths")
+    if paths:
+        result["file_paths"] = paths
+    elif record["result_type"] == "changes" and record.get("path"):
+        result["file_paths"] = [record["path"]]
+    return result
+
+
+def operation_search(
+    root: Path, query: str, task: str, maximum: int, offset: int,
+    record_type: str | None, as_json: bool,
+) -> None:
+    if maximum < 1:
+        raise ValidationError("--limit must be at least 1")
+    if offset < 0:
+        raise ValidationError("--offset must be at least 0")
+    table = TYPE_ALIASES.get(record_type.lower()) if record_type else None
+    if record_type and table is None and record_type.lower() != "session":
+        raise ValidationError("--type must name a supported memory type")
+    if record_type and record_type.lower() == "session":
+        table = "sessions"
+    connection = connect(require_initialized(root))
+    try:
+        migrate(connection)
+        repo = repository_row(connection, root)
+        results = [compact_record(record) for record in search_records(
+            connection, repo["id"], query, task, maximum, table, offset,
+        )]
+    finally:
+        connection.close()
+    if as_json:
+        print(json.dumps({"query": query, "task": task or None, "offset": offset, "results": results}, indent=2))
+        return
+    if not results:
+        print("No matching memories.")
+        return
+    for record in results:
+        status = f" [{record['status']}]" if record.get("status") else ""
+        authority = f" {record['confirmation']}" if record.get("confirmation") else ""
+        print(f"{record['type']} {record['id']}{status}: {record['title']} (~{record['estimated_tokens']} tokens{authority})")
+
+
+def resolve_record(connection: sqlite3.Connection, repository_id: int, identifier: str) -> tuple[str, dict[str, object]]:
+    for table in ("sessions", *ENTITY_TABLES, "feedback"):
+        if not identifier.startswith(PREFIXES[table] + "_"):
+            continue
+        row = connection.execute(
+            f"SELECT * FROM {table} WHERE repository_id=? AND public_id=?", (repository_id, identifier),
+        ).fetchone()
+        if row is not None:
+            record = decode_feedback(connection, row) if table == "feedback" else decode_row(table, row)
+            return table, record
+        break
+    raise NotFoundError(f"memory record not found: {identifier}")
+
+
+def operation_details(root: Path, identifiers: list[str], as_json: bool) -> None:
+    connection = connect(require_initialized(root))
+    try:
+        migrate(connection)
+        repo = repository_row(connection, root)
+        records = []
+        for identifier in identifiers:
+            table, record = resolve_record(connection, repo["id"], identifier)
+            record["result_type"] = table
+            records.append(record)
+    finally:
+        connection.close()
+    if as_json:
+        print(json.dumps({"records": records}, indent=2))
+        return
+    for index, record in enumerate(records):
+        if index:
+            print()
+        print(f"{record['result_type']} {record['id']}: {record_title(record)}")
+        print(json.dumps({key: value for key, value in record.items() if key not in {"id", "result_type"}}, indent=2))
+
+
+def timeline_records(
+    connection: sqlite3.Connection, repository_id: int, anchor: str, before: int, after: int,
+) -> list[dict[str, object]]:
+    anchor_table, _ = resolve_record(connection, repository_id, anchor)
+    if anchor_table == "sessions":
+        session_row = connection.execute(
+            "SELECT id FROM sessions WHERE repository_id=? AND public_id=?", (repository_id, anchor),
+        ).fetchone()
+    else:
+        session_row = connection.execute(
+            f"SELECT session_id AS id FROM {anchor_table} WHERE repository_id=? AND public_id=?",
+            (repository_id, anchor),
+        ).fetchone()
+    session_id = session_row["id"]
+    events: list[dict[str, object]] = []
+    session = connection.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+    if session is not None:
+        record = decode_row("sessions", session)
+        record["result_type"] = "sessions"
+        events.append(record)
+    for table in (*ENTITY_TABLES, "feedback"):
+        for record in rows(connection, table, "repository_id=? AND session_id=?", (repository_id, session_id)):
+            record["result_type"] = table
+            events.append(record)
+    events.sort(key=lambda record: (str(record.get("created_at") or record.get("started_at") or ""), str(record["id"])))
+    anchor_index = next(index for index, record in enumerate(events) if record["id"] == anchor)
+    selected = events[max(0, anchor_index - before):anchor_index + after + 1]
+    return [compact_record({**record, "title": record_title(record), "score": None}) for record in selected]
+
+
+def operation_timeline(root: Path, anchor: str, before: int, after: int, as_json: bool) -> None:
+    if before < 0 or after < 0:
+        raise ValidationError("--before and --after must be at least 0")
+    connection = connect(require_initialized(root))
+    try:
+        migrate(connection)
+        repo = repository_row(connection, root)
+        events = timeline_records(connection, repo["id"], anchor, before, after)
+    finally:
+        connection.close()
+    if as_json:
+        print(json.dumps({"anchor": anchor, "events": events}, indent=2))
+        return
+    for record in events:
+        marker = " <- anchor" if record["id"] == anchor else ""
+        print(f"{record.get('created_at') or 'unknown date'} {record['type']} {record['id']}: {record['title']}{marker}")
 
 
 def operation_recall(root: Path, query: str, task: str, maximum: int, as_json: bool) -> None:
@@ -1135,7 +1435,11 @@ def operation_recall(root: Path, query: str, task: str, maximum: int, as_json: b
         return
     for record in results:
         status = f" [{record['status']}]" if record.get("status") else ""
-        print(f"{record['result_type']} {record['id']}{status}: {record['title']}")
+        detail = record.get("summary") or record.get("rationale") or record.get("body") or ""
+        if isinstance(detail, list):
+            detail = "; ".join(detail)
+        suffix = f" - {detail}" if detail and detail != record["title"] else ""
+        print(f"{record['result_type']} {record['id']}{status}: {record['title']}{suffix}")
 
 
 def reference_issues(connection: sqlite3.Connection, repository_id: int) -> list[dict[str, str]]:
@@ -1916,6 +2220,8 @@ def parser() -> argparse.ArgumentParser:
     for operation in ("init", "status", "server", "serve", "stop"):
         command = subparsers.add_parser(operation)
         command.add_argument("--repo-root")
+        if operation == "init":
+            command.add_argument("--instruction-file", action="append", choices=sorted(INSTRUCTION_FILES), default=[])
         if operation == "status":
             command.add_argument("--json", action="store_true")
     capture = subparsers.add_parser("capture")
@@ -1927,13 +2233,32 @@ def parser() -> argparse.ArgumentParser:
     context = subparsers.add_parser("context")
     context.add_argument("--repo-root")
     context.add_argument("--task", default="")
-    context.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
+    context.add_argument("--profile", choices=tuple(CONTEXT_PROFILES), default="compact")
+    context.add_argument("--max-chars", type=int)
     recall = subparsers.add_parser("recall")
     recall.add_argument("--repo-root")
     recall.add_argument("query", nargs="+")
     recall.add_argument("--task", default="")
-    recall.add_argument("--max-results", type=int, default=10)
+    recall.add_argument("--max-results", type=int, default=5)
     recall.add_argument("--json", action="store_true")
+    search = subparsers.add_parser("search")
+    search.add_argument("--repo-root")
+    search.add_argument("query", nargs="+")
+    search.add_argument("--task", default="")
+    search.add_argument("--limit", type=int, default=5)
+    search.add_argument("--offset", type=int, default=0)
+    search.add_argument("--type")
+    search.add_argument("--json", action="store_true")
+    details = subparsers.add_parser("details")
+    details.add_argument("--repo-root")
+    details.add_argument("ids", nargs="+")
+    details.add_argument("--json", action="store_true")
+    timeline = subparsers.add_parser("timeline")
+    timeline.add_argument("--repo-root")
+    timeline.add_argument("anchor")
+    timeline.add_argument("--before", type=int, default=3)
+    timeline.add_argument("--after", type=int, default=3)
+    timeline.add_argument("--json", action="store_true")
     dream = subparsers.add_parser("dream")
     dream.add_argument("--repo-root")
     dream.add_argument("--apply", action="store_true")
@@ -1955,15 +2280,21 @@ def main(argv: list[str] | None = None) -> int:
         root = discover_repo(arguments.repo_root)
         operation = arguments.operation
         if operation == "init":
-            operation_init(root)
+            operation_init(root, arguments.instruction_file)
         elif operation == "capture":
             operation_capture(root, arguments.input.expanduser().resolve())
         elif operation == "feedback":
             operation_feedback(root, arguments.input.expanduser().resolve())
         elif operation == "context":
-            operation_context(root, arguments.task, arguments.max_chars)
+            operation_context(root, arguments.task, arguments.max_chars, arguments.profile)
         elif operation == "recall":
             operation_recall(root, " ".join(arguments.query), arguments.task, arguments.max_results, arguments.json)
+        elif operation == "search":
+            operation_search(root, " ".join(arguments.query), arguments.task, arguments.limit, arguments.offset, arguments.type, arguments.json)
+        elif operation == "details":
+            operation_details(root, arguments.ids, arguments.json)
+        elif operation == "timeline":
+            operation_timeline(root, arguments.anchor, arguments.before, arguments.after, arguments.json)
         elif operation == "dream":
             operation_dream(root, arguments.apply, arguments.json)
         elif operation == "status":
