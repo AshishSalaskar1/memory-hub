@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import html
+import io
 import json
 import mimetypes
 import os
@@ -14,8 +16,10 @@ import secrets
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import zipfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -333,6 +337,13 @@ def operation_init(root: Path) -> None:
         fts = migrate(connection)
         stamp = now()
         with connection:
+            current = connection.execute("SELECT id FROM repositories WHERE root_path=?", (str(root),)).fetchone()
+            existing = connection.execute("SELECT id FROM repositories ORDER BY id").fetchall()
+            if current is None and len(existing) == 1:
+                connection.execute(
+                    "UPDATE repositories SET root_path=?, name=?, updated_at=? WHERE id=?",
+                    (str(root), root.name, stamp, existing[0]["id"]),
+                )
             connection.execute(
                 """INSERT INTO repositories(public_id,root_path,name,initialized_at,updated_at,git_available,git_branch,git_head,git_dirty,git_changed_files)
                    VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(root_path) DO UPDATE SET
@@ -1293,6 +1304,85 @@ def session_markdown(connection: sqlite3.Connection, session: sqlite3.Row) -> st
     return "\n\n".join(parts)
 
 
+def export_documents(root: Path, connection: sqlite3.Connection) -> dict[str, str]:
+    repo = repository_row(connection, root)
+    rid = repo["id"]
+    generated_at = now()
+    documents: dict[str, str] = {}
+
+    def document(title: str, body: str) -> str:
+        return f"# {title}\n\n> Generated from `.memory-hub/memory.db` at {generated_at}. SQLite remains authoritative.\n\n{body.rstrip()}\n"
+
+    mappings = [
+        ("decisions", "Decisions", "decisions.md"), ("directions", "Developer Directions", "developer-directions.md"),
+        ("capabilities", "Capabilities", "capabilities.md"), ("open_loops", "Open Work", "open-work.md"),
+        ("feedback", "Feedback", "feedback.md"),
+    ]
+    for table, title, filename in mappings:
+        records = rows(connection, table, "repository_id=?", (rid,))
+        body = "\n".join(record_markdown(table, item) for item in records) or f"No {title.lower()} recorded."
+        documents[filename] = document(title, body)
+    state = status_data(root, connection)
+    state_body = "\n".join(f"- {key.replace('_', ' ').title()}: {md_escape(value)}" for key, value in state.items() if key != "git")
+    documents["repository-state.md"] = document("Repository State", state_body)
+    sessions = connection.execute("SELECT * FROM sessions WHERE repository_id=? ORDER BY started_at", (rid,)).fetchall()
+    for session in sessions:
+        decoded = decode_row("sessions", session)
+        name = f"sessions/{session_export_name(connection, rid, session)}"
+        documents[name] = document(f"Session {decoded['id']}", session_markdown(connection, session))
+    links = "\n".join(f"- [{name}]({name})" for name in documents)
+    documents["README.md"] = document(f"Memory Hub: {repo['name']}", links or "No exports generated.")
+    return documents
+
+
+def web_export(root: Path, export_format: str) -> tuple[bytes, str, str]:
+    database = require_initialized(root)
+    connection = connect(database)
+    try:
+        migrate(connection)
+        repo = repository_row(connection, root)
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", repo["name"]).strip("-") or "repository"
+        if export_format in {"markdown", "html"}:
+            documents = export_documents(root, connection)
+            if export_format == "markdown":
+                output = io.BytesIO()
+                with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+                    for name, body in documents.items():
+                        archive.writestr(name, body)
+                return output.getvalue(), "application/zip", f"memory-hub-{safe_name}-markdown.zip"
+            sections = []
+            for name, body in documents.items():
+                sections.append(f"<section><p class=\"source\">{html.escape(name)}</p><pre>{html.escape(body)}</pre></section>")
+            page = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Memory Hub Export</title><style>body{max-width:960px;margin:40px auto;padding:0 20px;color:#16252d;background:#f6f8f8;font:15px/1.55 system-ui,sans-serif}header{padding:28px;color:white;background:#0d3e51}h1{margin:0;font:36px Georgia,serif}section{margin:24px 0;padding:24px;background:white;border:1px solid #cbd5d8}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.6 ui-monospace,monospace}.source{color:#185c73;font:700 11px ui-monospace,monospace;text-transform:uppercase}</style></head><body>"""
+            page += f"<header><h1>Memory Hub: {html.escape(repo['name'])}</h1><p>Portable readable export generated {html.escape(now())}</p></header>{''.join(sections)}</body></html>"
+            return page.encode("utf-8"), "text/html; charset=utf-8", f"memory-hub-{safe_name}.html"
+
+        if export_format == "artifact":
+            output = io.BytesIO()
+            with tempfile.TemporaryDirectory() as temporary:
+                snapshot = Path(temporary) / "memory.db"
+                backup = sqlite3.connect(snapshot)
+                try:
+                    connection.backup(backup)
+                finally:
+                    backup.close()
+                manifest = {
+                    "format": "memory-hub-portable-artifact", "version": 1, "app_version": APP_VERSION,
+                    "repository": repo["name"], "exported_at": now(),
+                    "instructions": "Place memory.db in the target repository's .memory-hub directory and run memory-hub init. When the artifact contains one repository, init adopts it at the new path and refreshes local Git metadata.",
+                }
+                with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+                    archive.write(snapshot, "memory.db")
+                    archive.writestr("manifest.json", json.dumps(manifest, indent=2) + "\n")
+                    config = paths(root)[2]
+                    if config.is_file():
+                        archive.write(config, "config.json")
+            return output.getvalue(), "application/zip", f"memory-hub-{safe_name}-artifact.zip"
+        raise ValidationError("format: expected markdown|html|artifact")
+    finally:
+        connection.close()
+
+
 def operation_export(root: Path, target: str, session_identifier: str | None) -> None:
     connection = connect(require_initialized(root))
     output = paths(root)[0] / "exports"
@@ -1504,7 +1594,21 @@ def api_data(root: Path, endpoint: str, query: dict[str, list[str]]) -> object:
             tasks = rows(connection, "tasks", "repository_id=? AND status NOT IN ('completed','abandoned')", (rid,))
             return {"open_work": open_records + tasks}
         if endpoint == "/api/sessions":
-            return {"sessions": rows(connection, "sessions", "repository_id=?", (rid,))}
+            sessions = rows(connection, "sessions", "repository_id=?", (rid,))
+            count_tables = (*ENTITY_TABLES, "relationships")
+            counts = {session["id"]: {table: 0 for table in count_tables} for session in sessions}
+            for table in count_tables:
+                grouped = connection.execute(
+                    f"SELECT sessions.public_id, count({table}.id) "
+                    f"FROM sessions LEFT JOIN {table} ON {table}.session_id=sessions.id "
+                    "WHERE sessions.repository_id=? GROUP BY sessions.id",
+                    (rid,),
+                ).fetchall()
+                for session_id, count in grouped:
+                    counts[session_id][table] = count
+            for session in sessions:
+                session["extracted_counts"] = counts[session["id"]]
+            return {"sessions": sessions}
         if endpoint == "/api/feedback":
             clauses = ["feedback.repository_id=?"]
             params: list[object] = [rid]
@@ -1569,6 +1673,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_download(self, body: bytes, content_type: str, filename: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
     def send_api_error(self, exc: Exception) -> None:
         if isinstance(exc, ValidationError):
             status = 400
@@ -1604,6 +1718,13 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
             self.send_json({"status": "ok", "token": self.server.token, "pid": os.getpid()})
+            return
+        if parsed.path == "/api/export":
+            try:
+                export_format = (parse_qs(parsed.query, keep_blank_values=True).get("format") or [""])[0]
+                self.send_download(*web_export(self.server.repo_root, export_format))
+            except Exception as exc:
+                self.send_api_error(exc)
             return
         if parsed.path.startswith("/api/"):
             try:

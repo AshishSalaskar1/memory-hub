@@ -8,6 +8,12 @@
       description: "The current state, recent context, and work that still needs attention.",
       endpoint: "/api/overview"
     },
+    sessions: {
+      title: "Sessions",
+      eyebrow: "Work history",
+      description: "Open a captured session to review what was done and the data extracted into each memory section.",
+      endpoint: "/api/sessions"
+    },
     timeline: {
       title: "Timeline",
       eyebrow: "Chronological record",
@@ -43,6 +49,12 @@
       eyebrow: "Human signal",
       description: "Corrections, concerns, suggestions, and positive observations attached to repository memory.",
       endpoint: "/api/feedback"
+    },
+    help: {
+      title: "Help",
+      eyebrow: "Using Memory Hub",
+      description: "A quick guide to capturing, finding, reviewing, and moving repository memory.",
+      static: true
     }
   };
 
@@ -100,6 +112,7 @@
   var feedbackSession = document.getElementById("feedback-session");
   var feedbackRecordId = document.getElementById("feedback-record-id");
   var globalStatus = document.getElementById("global-status");
+  var exportDialog = document.getElementById("export-dialog");
 
   function el(tag, className, text) {
     var node = document.createElement(tag);
@@ -179,6 +192,9 @@
   function titleFor(record, fallback) {
     var feedbackShape = record && typeof record === "object" && record.body !== undefined && record.scope !== undefined && record.sentiment !== undefined;
     if (feedbackShape || recordIdentity(record, "").type === "feedback") return feedbackTitle(record);
+    if (record && record.from_id && record.to_id && record.type) {
+      return textValue(record.from_id) + " " + textValue(record.type).replace(/[_-]+/g, " ") + " " + textValue(record.to_id);
+    }
     return textValue(value(record, ["title", "name", "instruction", "goal", "summary", "event", "message"], fallback), fallback);
   }
 
@@ -390,7 +406,7 @@
       var records = recordsFrom(source[type], [type]);
       if (!records.length && Array.isArray(source[type])) records = source[type];
       return [type, records];
-    }).filter(function (entry) { return entry[1].length; });
+    });
   }
 
   function renderSessionDetail(payload) {
@@ -414,13 +430,13 @@
     fragment.append(sessionActions);
     var groups = sessionGroups(payload);
     var related = el("section", "related-ledger");
-    related.append(el("h3", "", "Related records"));
-    if (!groups.length) related.append(el("p", "quiet-empty", "No related records were returned for this session."));
+    related.append(el("h3", "", "Extracted data"));
     groups.forEach(function (entry) {
       var section = el("section", "related-group");
       var heading = el("div", "related-heading");
       heading.append(el("h4", "", humanLabel(entry[0])), el("span", "", String(entry[1].length).padStart(2, "0")));
       section.append(heading);
+      if (!entry[1].length) section.append(el("p", "section-empty", "Nothing was extracted into this section."));
       entry[1].forEach(function (record) { section.append(detailRecordButton(record, entry[0])); });
       related.append(section);
     });
@@ -649,9 +665,15 @@
     route = routes[route] ? route : "overview";
     state.route = route;
     setHeading(route);
-    filterBar.hidden = route === "overview";
+    filterBar.hidden = route === "overview" || route === "help";
     recordFilter.value = "";
     resetStatusFilter();
+
+    if (routes[route].static) {
+      state.records = [];
+      renderHelp();
+      return;
+    }
 
     if (!force && state.cache[route] !== undefined) {
       renderRoute(route, state.cache[route]);
@@ -734,6 +756,32 @@
     content.setAttribute("aria-busy", "false");
   }
 
+  function renderHelp() {
+    var guide = el("section", "help-guide");
+    var intro = el("article", "help-intro");
+    intro.append(el("p", "eyebrow", "The durable context layer"), el("h2", "", "Memory without the transcript noise"), el("p", "", "Memory Hub stores structured knowledge about a repository: what changed, why choices were made, what remains open, and which human directions should guide future work."));
+    guide.append(intro);
+    var topics = [
+      ["Capture sessions", "Use checkpoint while work continues and close when the logical session is finished. Each capture extracts tasks, changes, decisions, directions, capabilities, open loops, evidence, and relationships."],
+      ["Review history", "Sessions shows exactly what was extracted from each work session. Timeline combines sessions and important records chronologically. Open any card to inspect its complete ledger entry."],
+      ["Find context", "Search scans repository memory. Context retrieves a concise task-relevant pack; recall is best for narrow historical questions such as why a design was chosen."],
+      ["Correct the record", "Feedback can target the repository, a session, or one record. Record details can also be edited or deleted when integrity rules allow it."],
+      ["Understand confidence", "Source identifies where a claim came from, confidence describes certainty, and confirmation records whether a human approved it. These fields are intentionally independent."],
+      ["Export and migrate", "HTML is a standalone readable report. Markdown is a structured bundle. Artifact downloads a database snapshot and manifest that preserve the complete store for migration."],
+      ["Privacy", "The server binds to 127.0.0.1 only. Memory remains in this repository's .memory-hub directory, with no telemetry or cloud sync."],
+      ["Consolidation", "Dream audits duplicates and dangling references. Repairs are previewed before application and never reinterpret semantic content automatically."]
+    ];
+    var grid = el("div", "help-grid");
+    topics.forEach(function (topic, index) {
+      var card = el("article", "help-card");
+      card.append(el("span", "", String(index + 1).padStart(2, "0")), el("h2", "", topic[0]), el("p", "", topic[1]));
+      grid.append(card);
+    });
+    guide.append(grid);
+    content.replaceChildren(guide);
+    content.setAttribute("aria-busy", "false");
+  }
+
   function compactRecord(record, type) {
     if (typeof record !== "object" || record === null) record = { title: textValue(record) };
     var item = makeTrigger("compact-record record-trigger", record, type, "div");
@@ -773,6 +821,36 @@
     } else if (kind === "feedback") {
       appendMeta(card, [["Scope", value(record, ["scope"], null)], ["Rating", value(record, ["rating"], null)], ["Session", value(record, ["session_id"], null)], ["Record", value(record, ["record_id"], null)], ["Recorded", formatDate(recordDate(record))]]);
     }
+    return card;
+  }
+
+  function makeSessionCard(session) {
+    if (typeof session !== "object" || session === null) session = { id: textValue(session) };
+    var card = makeTrigger("record-card session-card record-trigger", session, "sessions", "article");
+    var top = el("div", "record-topline");
+    top.append(el("span", "record-kind", textValue(value(session, ["mode"], "session"))), statusPill(session));
+    card.append(top, el("h2", "", textValue(value(session, ["goal", "title"], "Captured session"))));
+    var summary = textValue(value(session, ["summary", "outcome_summary"], ""));
+    if (summary) card.append(el("p", "record-summary", summary));
+
+    var counts = value(session, ["extracted_counts"], {});
+    if (counts && typeof counts === "object" && !Array.isArray(counts)) {
+      var extraction = el("div", "session-extraction");
+      extraction.append(el("h3", "", "Extracted data"));
+      var countList = el("div", "session-counts");
+      recordTypes.forEach(function (type) {
+        var item = el("span");
+        item.append(el("b", "", textValue(counts[type], "0")), document.createTextNode(humanLabel(type)));
+        countList.append(item);
+      });
+      extraction.append(countList);
+      card.append(extraction);
+    }
+    appendMeta(card, [
+      ["Agent", value(session, ["agent"], null)],
+      ["Started", formatDate(value(session, ["started_at", "created_at"], null))],
+      ["Closed", value(session, ["closed_at"], null) ? formatDate(session.closed_at) : "Still open"]
+    ]);
     return card;
   }
 
@@ -816,8 +894,16 @@
     return grid;
   }
 
+  function renderSessions(records) {
+    if (!records.length) return emptyState("No sessions recorded", "Captured work and its extracted memory will appear here after the first checkpoint or close.");
+    var grid = el("section", "record-grid session-grid");
+    records.forEach(function (session) { grid.append(makeSessionCard(session)); });
+    return grid;
+  }
+
   function routeRecords(route, payload) {
     var keys = {
+      sessions: ["sessions"],
       timeline: ["timeline", "events", "entries"],
       decisions: ["decisions"],
       capabilities: ["capabilities"],
@@ -841,7 +927,7 @@
   }
 
   function populateStatuses(records, sentiments) {
-    document.getElementById("status-filter-label").textContent = sentiments ? "Sentiment" : "Status";
+    document.getElementById("status-filter-label").textContent = sentiments ? "Sentiment" : (state.route === "sessions" ? "Outcome" : "Status");
     var statuses = Array.from(new Set(records.map(sentiments ? feedbackSentiment : normalizedStatus))).sort();
     resetStatusFilter();
     statuses.forEach(function (status) {
@@ -852,7 +938,7 @@
   }
 
   function resetStatusFilter() {
-    var option = el("option", "", state.route === "feedback" ? "All sentiments" : "All statuses");
+    var option = el("option", "", state.route === "feedback" ? "All sentiments" : (state.route === "sessions" ? "All outcomes" : "All statuses"));
     option.value = "";
     statusFilter.replaceChildren(option);
   }
@@ -872,6 +958,7 @@
     filterCount.value = filtered.length + (filtered.length === 1 ? " record" : " records");
     var result;
     if (state.route === "timeline") result = renderTimeline(filtered);
+    else if (state.route === "sessions") result = renderSessions(filtered);
     else {
       var kind = { decisions: "decision", capabilities: "capability", directions: "direction", "open-work": "work", feedback: "feedback" }[state.route];
       result = renderRecords(filtered, kind);
@@ -1053,6 +1140,11 @@
 
   window.addEventListener("hashchange", function () { loadRoute(currentRoute(), false); });
   document.getElementById("refresh-button").addEventListener("click", function () { loadRoute(state.route, true); });
+  document.getElementById("export-button").addEventListener("click", function () { exportDialog.showModal(); });
+  document.getElementById("close-export").addEventListener("click", function () { exportDialog.close(); });
+  exportDialog.addEventListener("click", function (event) {
+    if (event.target === exportDialog) exportDialog.close();
+  });
   recordFilter.addEventListener("input", applyFilters);
   statusFilter.addEventListener("change", applyFilters);
   document.getElementById("search-form").addEventListener("submit", function (event) {

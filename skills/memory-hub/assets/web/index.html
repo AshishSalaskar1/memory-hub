@@ -39,12 +39,14 @@
       <p class="nav-label">Browse</p>
       <nav id="primary-nav">
         <a href="#overview" data-route="overview"><span>Overview</span><b aria-hidden="true">OV</b></a>
+        <a href="#sessions" data-route="sessions"><span>Sessions</span><b aria-hidden="true">SS</b></a>
         <a href="#timeline" data-route="timeline"><span>Timeline</span><b aria-hidden="true">TL</b></a>
         <a href="#decisions" data-route="decisions"><span>Decisions</span><b aria-hidden="true">DC</b></a>
         <a href="#capabilities" data-route="capabilities"><span>Capabilities</span><b aria-hidden="true">CP</b></a>
         <a href="#directions" data-route="directions"><span>Developer directions</span><b aria-hidden="true">DR</b></a>
         <a href="#open-work" data-route="open-work"><span>Open work</span><b aria-hidden="true">OW</b></a>
         <a href="#feedback" data-route="feedback"><span>Feedback</span><b aria-hidden="true">FB</b></a>
+        <a href="#help" data-route="help"><span>Help</span><b aria-hidden="true">?</b></a>
       </nav>
       <div class="privacy-note">
         <span aria-hidden="true">127.0.0.1</span>
@@ -61,6 +63,7 @@
         </div>
         <div class="heading-actions">
           <button class="primary-button" id="add-feedback-button" type="button" hidden>Add feedback</button>
+          <button class="secondary-button" id="export-button" type="button">Export</button>
           <button class="refresh-button" id="refresh-button" type="button" title="Refresh this view">
             <span aria-hidden="true">&#8635;</span> Refresh
           </button>
@@ -95,6 +98,30 @@
     </div>
     <p class="search-summary" id="search-summary" aria-live="polite"></p>
     <div id="search-results"></div>
+  </dialog>
+
+  <dialog id="export-dialog" class="export-dialog" aria-labelledby="export-title">
+    <div class="dialog-header">
+      <div>
+        <p class="eyebrow">Take memory with you</p>
+        <h2 id="export-title">Export repository memory</h2>
+      </div>
+      <button class="icon-button" id="close-export" type="button" aria-label="Close export options">Close</button>
+    </div>
+    <div class="export-body">
+      <p>Choose a readable export for review or a portable artifact for migration. Exports never modify the local memory database.</p>
+      <div class="export-options">
+        <a class="export-option" href="/api/export?format=html" download>
+          <span>HTML</span><strong>Single readable document</strong><small>Open in any browser or attach as a standalone report.</small>
+        </a>
+        <a class="export-option" href="/api/export?format=markdown" download>
+          <span>Markdown</span><strong>Structured file bundle</strong><small>Includes repository summaries and a file for every session.</small>
+        </a>
+        <a class="export-option" href="/api/export?format=artifact" download>
+          <span>Artifact</span><strong>Portable database snapshot</strong><small>Preserves the complete structured store for migration as-is.</small>
+        </a>
+      </div>
+    </div>
   </dialog>
 
   <dialog id="detail-dialog" class="ledger-dialog" aria-labelledby="detail-title" aria-describedby="detail-status">

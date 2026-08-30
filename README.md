@@ -119,8 +119,8 @@ You can use natural language too. Requests such as `Initialize Memory Hub for th
 | `/memory-hub feedback` | Record a correction, concern, suggestion, or positive note |
 | `/memory-hub status` | Check memory health and recent activity |
 | `/memory-hub dream` | Audit the store and preview safe repairs |
-| `/memory-hub export` | Generate readable Markdown exports |
-| `/memory-hub server` | Browse repository memory in a local web interface |
+| `/memory-hub export` | Generate readable Markdown exports on disk |
+| `/memory-hub server` | Browse, review, edit, export, and migrate repository memory in a local web interface |
 | `/memory-hub stop` | Stop the local web interface |
 
 If your agent does not accept arguments after a slash command, put the request on the next line:
@@ -151,11 +151,26 @@ Start the local browser:
 /memory-hub server
 ```
 
-Memory Hub returns a URL such as `http://127.0.0.1:47321`. The browser includes an overview, timeline, search, decisions, capabilities, developer directions, feedback, and open work.
+Memory Hub returns a URL such as `http://127.0.0.1:47321`. The browser includes an overview, sessions, timeline, search, decisions, capabilities, developer directions, feedback, open work, exports, and built-in help. Dialogs and detail ledgers are scrollable on desktop and mobile, so long records and their action buttons remain accessible.
 
 ![Memory Hub repository overview showing recent decisions and open work](screenshots/Screenshot_20260830_003256.png)
 
-Sessions open into a complete ledger of their checkpoints, tasks, changes, decisions, directions, capabilities, open loops, evidence, and relationships. Supported memory fields can be edited, and unreferenced records can be deleted.
+### Inspect each session
+
+The **Sessions** view shows every captured work session with its goal, summary, outcome, agent, timestamps, and extracted-record counts. Open a session to see what was done and review the data extracted into each section:
+
+- Checkpoints
+- Tasks
+- Changes
+- Decisions
+- Developer directions
+- Capabilities
+- Open loops
+- Evidence
+- Relationships
+- Feedback
+
+Empty sections remain visible so it is clear what was and was not extracted. Relationship entries are labeled from their source record, relationship type, and target record instead of appearing untitled. Individual records open into their complete ledger; supported memory fields can be edited, and unreferenced records can be deleted.
 
 ### Follow the history
 
@@ -170,6 +185,20 @@ Dedicated views preserve technical decisions with their rationale and the develo
 | Decisions | Developer directions |
 |---|---|
 | ![Memory Hub decisions view showing rationale, alternatives, and trade-offs](screenshots/Screenshot_20260830_003338.png) | ![Memory Hub developer directions view showing retained human guidance](screenshots/Screenshot_20260830_003350.png) |
+
+### Export or migrate from the browser
+
+Select **Export** from any browser view to download one of three formats:
+
+| Format | Contents | Best for |
+|---|---|---|
+| HTML | One standalone, readable document | Opening in a browser, sharing a report, or archiving a human-readable snapshot |
+| Markdown | A ZIP containing repository summaries and one Markdown file per session | Documentation, review, and selective version control |
+| Artifact | A ZIP containing a consistent `memory.db` snapshot, `config.json`, and a migration manifest | Moving the complete structured store to another checkout or repository path |
+
+To migrate an artifact, extract `memory.db` into the target repository's `.memory-hub/` directory and run `/memory-hub init`. If the snapshot contains one repository, initialization adopts that memory at the new path and refreshes local repository metadata without removing its sessions or records.
+
+The **Help** view explains the main capture, retrieval, review, feedback, confidence, export, privacy, and consolidation workflows inside the browser.
 
 The server binds only to `127.0.0.1`. It has no telemetry and does not synchronize data to the cloud. Stop it with:
 
@@ -240,7 +269,7 @@ Feedback can apply to the repository, a session, or a specific memory record. It
 
 `dream` audits the memory store. By default it is a dry run that reports index issues, dangling references, relationship inconsistencies, and exact duplicate candidates. After you approve the report, `/memory-hub dream apply` can rebuild the search index and make mechanically safe repairs. It does not merge similar records, delete history, or invent rationale.
 
-`export` writes browsable Markdown under `.memory-hub/exports/`. SQLite remains authoritative, so editing an export does not change stored memory.
+The command-line `export` writes browsable Markdown under `.memory-hub/exports/`. The browser also offers downloadable HTML, a Markdown ZIP, and a portable migration artifact. SQLite remains authoritative, so editing an HTML or Markdown export does not change stored memory.
 
 ## Installation options
 
@@ -352,7 +381,7 @@ Repository memory lives under:
 `-- server.json
 ```
 
-`memory.db` is the source of truth. Exports are generated views, and `server.json` identifies the local browser process so Memory Hub can stop only the server it started.
+`memory.db` is the source of truth. HTML and Markdown exports are generated views. Portable artifacts contain a consistent database snapshot for migration. `server.json` identifies the local browser process so Memory Hub can stop only the server it started.
 
 Memory Hub is local-first. It has no required cloud account, cloud synchronization, or telemetry. It stores extracted knowledge rather than raw transcripts. Suspected secrets should be redacted before capture.
 

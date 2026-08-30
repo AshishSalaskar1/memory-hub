@@ -10,6 +10,8 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import zipfile
+import io
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -149,6 +151,11 @@ class MemoryHubCLITests(unittest.TestCase):
         payload = json.loads(raw.decode("utf-8")) if raw else None
         self.assertEqual(status, expected_status, payload)
         return payload
+
+    def download_request(self, path):
+        state = self.start_server()
+        with urllib.request.urlopen(f"http://127.0.0.1:{state['port']}{path}", timeout=3) as response:
+            return response.read(), response.headers
 
     def test_init_is_idempotent_and_supports_non_git_directory(self):
         config_path = self.repo / ".memory-hub" / "config.json"
@@ -569,6 +576,13 @@ class MemoryHubCLITests(unittest.TestCase):
         self.assertEqual(details["evidence"][0]["summary"], "Session child evidence")
         self.assertEqual(len(details["relationships"]), 1)
 
+        sessions = self.api_request("/api/sessions")["sessions"]
+        listed = next(session for session in sessions if session["id"] == session_id)
+        self.assertEqual(listed["extracted_counts"]["tasks"], 1)
+        self.assertEqual(listed["extracted_counts"]["evidence"], 1)
+        self.assertEqual(listed["extracted_counts"]["relationships"], 1)
+        self.assertEqual(listed["extracted_counts"]["decisions"], 0)
+
         record = self.api_request(f"/api/records/task/{task_id}")
         self.assertEqual(record["id"], task_id)
         self.assertIn("editable_fields", record)
@@ -576,6 +590,50 @@ class MemoryHubCLITests(unittest.TestCase):
         self.assertIn("tests", record["editable_fields"])
         self.assertNotIn("id", record["editable_fields"])
         self.assertNotIn("session_id", record["editable_fields"])
+
+    def test_web_exports_include_readable_and_portable_formats(self):
+        payload = capture_payload(mode="close", summary="Exported session")
+        payload["decisions"] = [{
+            "title": "Portable choice", "status": "active", "scope": "exports",
+            "rationale": ["Keep migration exact"],
+        }]
+        self.assertEqual(self.capture(payload).returncode, 0)
+
+        html_body, html_headers = self.download_request("/api/export?format=html")
+        self.assertIn("text/html", html_headers["Content-Type"])
+        self.assertIn("Portable choice", html_body.decode("utf-8"))
+
+        markdown_body, markdown_headers = self.download_request("/api/export?format=markdown")
+        self.assertEqual(markdown_headers["Content-Type"], "application/zip")
+        with zipfile.ZipFile(io.BytesIO(markdown_body)) as archive:
+            self.assertIn("README.md", archive.namelist())
+            self.assertIn("Portable choice", archive.read("decisions.md").decode("utf-8"))
+
+        artifact_body, artifact_headers = self.download_request("/api/export?format=artifact")
+        self.assertEqual(artifact_headers["Content-Type"], "application/zip")
+        with zipfile.ZipFile(io.BytesIO(artifact_body)) as archive:
+            self.assertEqual(set(archive.namelist()), {"memory.db", "manifest.json", "config.json"})
+            self.assertEqual(json.loads(archive.read("manifest.json"))["format"], "memory-hub-portable-artifact")
+
+        error = self.api_request("/api/export?format=invalid", expected_status=400)
+        self.assertIn("expected markdown|html|artifact", error["error"])
+
+    def test_init_adopts_single_repository_from_migrated_artifact(self):
+        self.assertEqual(self.capture(capture_payload(summary="Memory to migrate")).returncode, 0)
+        destination = Path(self.temporary.name) / "migrated-repository"
+        (destination / ".memory-hub").mkdir(parents=True)
+        source = self.repo / ".memory-hub" / "memory.db"
+        (destination / ".memory-hub" / "memory.db").write_bytes(source.read_bytes())
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "init", "--repo-root", str(destination)],
+            text=True, capture_output=True, timeout=15, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with sqlite3.connect(destination / ".memory-hub" / "memory.db") as connection:
+            repositories = connection.execute("SELECT root_path FROM repositories").fetchall()
+            sessions = connection.execute("SELECT count(*) FROM sessions").fetchone()[0]
+        self.assertEqual(repositories, [(str(destination),)])
+        self.assertEqual(sessions, 1)
 
     def test_api_patch_scalar_and_array_updates_search_index(self):
         payload = capture_payload(summary="Patch fixture")

@@ -121,6 +121,8 @@ In reduced mode, return the structured feedback JSON in the conversation and sta
 
 Run the matching operation. Exports are generated views and must not be presented as database input. Report the server URL exactly as returned; it must use `127.0.0.1`. Reuse a healthy existing server. Stop only the process identified by `.memory-hub/server.json`, never an arbitrary matching process.
 
+The browser Export control provides a standalone HTML report, a ZIP of Markdown files, and a portable artifact containing a consistent SQLite snapshot plus migration manifest. To migrate an artifact, place its `memory.db` in the target repository's `.memory-hub/` directory and run `init`; a snapshot containing one repository is adopted at the new path while preserving its sessions and records.
+
 ## Fail safely
 
 On validation failure, do not retry with fields removed silently. Report the failing field and expected contract, correct only what can be established, and ask about semantic ambiguity. On missing initialization, offer or run `init` only with user approval before the requested mutating action. On missing dependencies or denied execution, switch to reduced mode and say what was not persisted.
